@@ -225,6 +225,5 @@ class Necto(BaseAgent):
         }
         return info
 
-
 def create_agent(name, team, index):
     return Necto(name, team, index)
