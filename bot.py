@@ -1,11 +1,18 @@
 import numpy as np
 import torch
+import time
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.structures.game_data_struct import GameTickPacket
 from rlgym_compat import GameState
 
-from agent import Agent
+from live_policy import LivePolicy
+from ring_buffer import RingBuffer
+from rewards_ssl import SSLReward, DEFAULT_SSL_W
+from kickoff_detector import is_kickoff_pause, detect_spawn_side
+from speedflip import run_speedflip, SpeedFlipParams
 from necto_obs import NectoObsBuilder
+
+ALLOWED_INDICES = {0, 1}
 
 KICKOFF_CONTROLS = (
         11 * 4 * [SimpleControllerState(throttle=1, boost=True)]
@@ -25,10 +32,12 @@ KICKOFF_NUMPY = np.array([
 
 class Necto(BaseAgent):
     def __init__(self, name, team, index, beta=1, render=False, hardcoded_kickoffs=True):
+        if index not in ALLOWED_INDICES:
+            print(f"[guard] refusing unexpected bot index={index}")
+            raise SystemExit(0)
         super().__init__(name, team, index)
 
         self.obs_builder = None
-        self.agent = Agent()
         self.tick_skip = 8
 
         # Beta controls randomness:
@@ -36,6 +45,13 @@ class Necto(BaseAgent):
         self.beta = beta
         self.render = render
         self.hardcoded_kickoffs = hardcoded_kickoffs
+
+        self.policy = LivePolicy(path="necto-model.pt")
+        self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
+        self.ssl_reward = SSLReward(DEFAULT_SSL_W)
+        self.kick_params = SpeedFlipParams()
+        self.kick_start_time = None
+        self.spawn_side = None
 
         self.game_state: GameState = None
         self.controls = None
@@ -52,6 +68,7 @@ class Necto(BaseAgent):
     def initialize_agent(self):
         # Initialize the rlgym GameState object now that the game is active and the info is available
         field_info = self.get_field_info()
+        self.field_info = field_info
         self.obs_builder = NectoObsBuilder(field_info=field_info)
         self.game_state = GameState(field_info)
         self.ticks = self.tick_skip  # So we take an action the first tick
@@ -102,26 +119,32 @@ class Necto(BaseAgent):
 
             self.game_state.players = [player] + teammates + opponents
 
-            obs = self.obs_builder.build_obs(player, self.game_state, self.action)
+            obs_tuple = self.obs_builder.build_obs(player, self.game_state, self.action)
+            obs_flat = self._flatten_obs(obs_tuple)
 
-            beta = self.beta
-            if packet.game_info.is_match_ended:
-                # or not (packet.game_info.is_kickoff_pause or packet.game_info.is_round_active): Removed due to kickoff
-                beta = 0  # Celebrate with random actions
-            self.action, weights = self.agent.act(obs, beta)
+            self.action = self.policy.act(obs_flat)
 
-            if self.render:
-                self.render_attention_weights(weights, obs)
+            info = self._compute_info(packet)
+            reward = self.ssl_reward(info)
+            done = packet.game_info.is_match_ended
+            self.buffer.push(obs_flat, self.action, reward, done)
 
         if self.ticks >= self.tick_skip:
             self.ticks = 0
             self.update_controls(self.action)
             self.update_action = 1
 
-        if self.hardcoded_kickoffs:
-            self.maybe_do_kickoff(packet, ticks_elapsed)
+        ctl = self.controls
+        if is_kickoff_pause(packet):
+            if self.kick_start_time is None:
+                self.kick_start_time = time.time()
+                self.spawn_side = detect_spawn_side(packet.game_cars[self.index], self.field_info)
+            tsk = time.time() - self.kick_start_time
+            ctl = run_speedflip(packet, self.spawn_side, ctl, self.kick_params, tsk)
+        else:
+            self.kick_start_time = None
 
-        return self.controls
+        return ctl
 
     def maybe_do_kickoff(self, packet, ticks_elapsed):
         if packet.game_info.is_kickoff_pause:
@@ -166,3 +189,42 @@ class Necto(BaseAgent):
         self.controls.jump = action[5] > 0
         self.controls.boost = action[6] > 0
         self.controls.handbrake = action[7] > 0
+
+    def _flatten_obs(self, obs):
+        if isinstance(obs, (list, tuple)):
+            arr = np.concatenate([np.asarray(o).flatten() for o in obs])
+        else:
+            arr = np.asarray(obs).flatten()
+        if arr.size < 107:
+            arr = np.pad(arr, (0, 107 - arr.size))
+        return arr[:107].astype(np.float32)
+
+    def _compute_info(self, packet):
+        ball = packet.game_ball
+        vel = np.array([
+            ball.physics.velocity.x,
+            ball.physics.velocity.y,
+            ball.physics.velocity.z,
+        ])
+        goal_dir = np.array([0, 1 if self.team == 0 else -1, 0], dtype=np.float32)
+        speed = np.linalg.norm(vel) + 1e-6
+        info = {
+            "ball_to_opp_goal_cos": float(np.dot(vel, goal_dir) / speed),
+            "ball_speed_gain_norm": float(speed / 6000.0),
+            "aerial_alignment_cos": 0.0,
+            "gta_transition_flag": 0.0,
+            "boost_use_good": 0.0,
+            "boost_waste": 0.0,
+            "shadow_angle_cos": 0.0,
+            "last_man_break_flag": 0.0,
+            "kickoff_score": 0.0,
+            "scored": 0.0,
+            "conceded": 0.0,
+            "own_goal_touch": 0.0,
+            "idle_ticks": 0.0,
+        }
+        return info
+
+
+def create_agent(name, team, index):
+    return Necto(name, team, index)
