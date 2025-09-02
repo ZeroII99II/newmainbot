@@ -12,6 +12,8 @@ from kickoff_detector import is_kickoff_pause, detect_spawn_side
 from speedflip import run_speedflip, SpeedFlipParams
 from necto_obs import NectoObsBuilder
 
+ALLOWED_INDICES = {0, 1}
+
 KICKOFF_CONTROLS = (
         11 * 4 * [SimpleControllerState(throttle=1, boost=True)]
         + 4 * 4 * [SimpleControllerState(throttle=1, boost=True, steer=-1)]
@@ -30,6 +32,9 @@ KICKOFF_NUMPY = np.array([
 
 class Necto(BaseAgent):
     def __init__(self, name, team, index, beta=1, render=False, hardcoded_kickoffs=True):
+        if index not in ALLOWED_INDICES:
+            print(f"[guard] refusing unexpected bot index={index}")
+            raise SystemExit(0)
         super().__init__(name, team, index)
 
         self.obs_builder = None
@@ -219,3 +224,6 @@ class Necto(BaseAgent):
             "idle_ticks": 0.0,
         }
         return info
+
+def create_agent(name, team, index):
+    return Necto(name, team, index)
