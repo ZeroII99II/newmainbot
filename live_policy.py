@@ -13,20 +13,20 @@ class LivePolicy:
     def __init__(self, path="destroyer.pt", device="cpu", fallback_paths=None):
         self.device = device
         self.path = path
-        self.fallbacks = [p for p in (fallback_paths or []) if p != path]
+        self.fallbacks = [p for p in (fallback_paths or []) if p and p != path]
         self.mtime = 0.0
         self.model = None
         if TORCH_OK:
             self._try_load(first=True)
 
     def _attempt_load_file(self, fpath):
-        if not os.path.exists(fpath):
+        if not fpath or not os.path.exists(fpath):
             return False
         try:
             m = torch.jit.load(fpath, map_location=self.device).eval()
             self.model = m
             self.mtime = os.path.getmtime(fpath)
-            self.path = fpath
+            self.path = fpath  # lock onto the file we actually loaded
             print(f"[Destroyer] Loaded JIT model: {os.path.basename(fpath)} @ {time.ctime(self.mtime)}")
             return True
         except Exception as e:

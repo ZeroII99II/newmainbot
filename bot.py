@@ -1,8 +1,7 @@
 # bot.py — Destroyer: resumes from Necto (working copy), hot-reload, kickoff-after-pause, fallback motion
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
-import numpy as np, math, os, time, shutil
-from pathlib import Path
+import numpy as np, math, time
 from enum import Enum
 
 # ===== Runtime knobs =====
@@ -22,8 +21,20 @@ TRAINER_LR = 3e-4
 ALLOWED_INDICES = {0, 1}         # clean 1v1 only
 
 # ==== Model resume settings ====
+from pathlib import Path
+import os, shutil
+
+# We prefer to train on a local working copy so the original base file is never overwritten.
 MODEL_PREFERENCE = ["destroyer.pt", "necto-model.pt", "necto.pt", "NectoModel.pt", "model.pt"]
-WORKING_MODEL = "destroyer.pt"    # fine-tune target; created from first found base
+WORKING_MODEL = "destroyer.pt"
+
+# Extra places to search automatically for the base model:
+MODEL_SEARCH_DIRS = [
+    Path(__file__).parent,                          # repo root
+    Path(__file__).parent / "models",               # optional ./models
+    Path.home() / "AppData/Local/RLBotGUIX/Bots",   # RLBot GUI cache (common)
+    Path(r"C:\\Users\\subze\\AppData\\Local\\RLBotGUIX\\RLBotPackDeletable\\RLBotPack-master\\RLBotPack\\Necto\\Necto"),  # provided path
+]
 
 # ==== Imports from our local modules ====
 from live_policy import LivePolicy
@@ -114,26 +125,46 @@ class Destroyer(BaseAgent):
             print(f"[guard] refusing unexpected bot index={self.index}")
             raise SystemExit(0)
 
-        # --- Warm start from existing model(s) ---
-        def _pick_existing_model():
-            for name in MODEL_PREFERENCE:
-                if Path(name).exists():
-                    return name
+        # --- Warm-start from existing model(s) ---
+        def _auto_find_model():
+            # 0) Explicit env override wins
+            env_path = os.environ.get("DESTROYER_MODEL")
+            if env_path and Path(env_path).exists():
+                return Path(env_path)
+
+            # 1) Look for preferred names in our search dirs
+            for base in MODEL_SEARCH_DIRS:
+                if not base.exists():
+                    continue
+                # direct check
+                for name in MODEL_PREFERENCE:
+                    p = base / name
+                    if p.exists():
+                        return p
+                # recursive check (safe enough for RLBot dirs)
+                try:
+                    for name in MODEL_PREFERENCE:
+                        for p in base.rglob(name):
+                            return p
+                except Exception:
+                    pass
             return None
 
-        base_model = _pick_existing_model()
-        if base_model is None:
-            print("[Destroyer] WARNING: No base model found next to bot.py. Expected one of:", MODEL_PREFERENCE)
+        src_model = _auto_find_model()
+        if src_model is None:
+            print("[Destroyer] WARNING: No base model found. Looked for", MODEL_PREFERENCE, "in", MODEL_SEARCH_DIRS, "and DESTROYER_MODEL env var.")
         else:
-            if not Path(WORKING_MODEL).exists():
+            # Make a working copy in the repo so we don't overwrite your base file
+            dst = Path(WORKING_MODEL)
+            if not dst.exists():
                 try:
-                    shutil.copy(base_model, WORKING_MODEL)
-                    print(f"[Destroyer] Warm-started working model '{WORKING_MODEL}' from '{base_model}'")
+                    shutil.copy(str(src_model), str(dst))
+                    print(f"[Destroyer] Warm-started working model '{dst.name}' from '{src_model}'")
                 except Exception as e:
                     print(f"[Destroyer] Copy failed ({e}); will try to load base directly")
 
-        # Policy loads working model, with fallbacks to base names
-        self.policy = LivePolicy(path=WORKING_MODEL, device="cpu", fallback_paths=MODEL_PREFERENCE)
+        self.policy = LivePolicy(path=WORKING_MODEL, device="cpu",
+                                 fallback_paths=MODEL_PREFERENCE + ([str(src_model)] if src_model else []))
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
 
