@@ -25,6 +25,8 @@ from drills_ssl import (
     inject_backboard_defense,
     inject_open_net,
     inject_bad_recovery,
+    inject_box_clear,
+    inject_box_panic,
 )
 
 # ===== Runtime knobs =====
@@ -74,6 +76,7 @@ from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy
 from aerial_play import AirDribbleBrain, BackboardDefenseBrain
 from finisher import FinisherBrain
+from danger_clear import DangerClearBrain
 from curriculum import STAGES, LOWER_IS_BETTER, combine_reward_boosts
 from progress_store import ProgressStore
 from hud_overlay import draw_hud
@@ -209,6 +212,7 @@ class Destroyer(BaseAgent):
         self.air_offense = AirDribbleBrain()
         self.air_defense = BackboardDefenseBrain()
         self.finisher = FinisherBrain()
+        self.danger_clear = DangerClearBrain()
         self._last_finish = "POWER_SHOT"
 
         # curriculum knobs
@@ -229,6 +233,8 @@ class Destroyer(BaseAgent):
         self.drill_probs["reads"]  += [("backboard_defense", 0.20)]
         self.drill_probs["reads"]  += [("open_net", 0.25), ("bad_recovery", 0.25)]
         self.drill_probs["aerial"] += [("bad_recovery", 0.15)]
+        self.drill_probs["reads"]  += [("box_clear", 0.30), ("box_panic", 0.20)]
+        self.drill_probs["core"]   += [("box_clear", 0.20)]
         self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
 
         # kickoff tracking + correct timing (after pause)
@@ -384,6 +390,10 @@ class Destroyer(BaseAgent):
                     inject_open_net(self)
                 elif choice == "bad_recovery":
                     inject_bad_recovery(self)
+                elif choice == "box_clear":
+                    inject_box_clear(self)
+                elif choice == "box_panic":
+                    inject_box_panic(self)
             except Exception:
                 pass
             self._last_drill_time = now
@@ -520,7 +530,19 @@ class Destroyer(BaseAgent):
         if rec_active:
             action = rec_action
         else:
-            if intent == "EXPLOIT":
+            if ctx.get("danger_zone", False) and intent in ("CLEAR_CORNER", "PANIC_CLEAR", "SHADOW", "CLEAR"):
+                ctl = self.danger_clear.act(packet, self.index)
+                action = np.array([
+                    float(ctl.steer or 0.0),
+                    float(ctl.throttle or 0.0),
+                    float(ctl.pitch or 0.0),
+                    float(ctl.yaw or 0.0),
+                    float(ctl.roll or 0.0),
+                    1.0 if ctl.jump else 0.0,
+                    1.0 if ctl.boost else 0.0,
+                    1.0 if ctl.handbrake else 0.0
+                ], dtype=np.float32)
+            elif intent == "EXPLOIT":
                 ctl, fin = self.finisher.act(packet, self.index, ctx)
                 self._last_finish = fin
                 extras["finisher_choice"] = fin
@@ -740,7 +762,8 @@ class Destroyer(BaseAgent):
                 # Build a short "reasons" string from ctx
                 rP = float(ctx.get("pressure_idx", 0.0))
                 rT = float(ctx.get("threat_idx", 0.0))
-                reasons = f"P:{rP:.2f} T:{rT:.2f} EXP:{int(ctx.get('exploit_window',0))} FIN:{getattr(self,'_last_finish','')}"
+                dz = int(1 if ctx.get("danger_zone", False) else 0)
+                reasons = f"P:{rP:.2f} T:{rT:.2f} DZ:{dz} EXP:{int(ctx.get('exploit_window',0))} FIN:{getattr(self,'_last_finish','')}"
                 stage_name = STAGES[self.academy.stage_idx].name
                 draw_hud(self.renderer, 10, 24, stage_name, intent, reasons, self._progress, sample_out)
         except Exception:

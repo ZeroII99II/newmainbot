@@ -1,7 +1,7 @@
 # decision_head.py — intent guards that shape/control actions
 import numpy as np
 
-INTENTS = {"PRESS","CONTROL","CHALLENGE","SHADOW","BOOST","CLEAR","DRIBBLE","SHOOT","FAKE","ROTATE_BACK_POST","STARVE","BUMP","AIR_DRIBBLE","BACKBOARD_DEFEND","EXPLOIT"}
+INTENTS = {"PRESS","CONTROL","CHALLENGE","SHADOW","BOOST","CLEAR","DRIBBLE","SHOOT","FAKE","ROTATE_BACK_POST","STARVE","BUMP","AIR_DRIBBLE","BACKBOARD_DEFEND","EXPLOIT","CLEAR_CORNER","PANIC_CLEAR"}
 
 def guard_by_intent(intent: str, action: np.ndarray, ctx: dict) -> np.ndarray:
     """
@@ -83,6 +83,21 @@ def guard_by_intent(intent: str, action: np.ndarray, ctx: dict) -> np.ndarray:
         # Aggressive acceleration & boost allowed, keep handbrake off; jumps allowed for finishes
         a[1] = 1.0
         a[6] = max(a[6], 0.8)
+        a[7] = 0.0
+        return a
+
+    if intent == "CLEAR_CORNER":
+        # decisive clear: full throttle, boost allowed, no handbrake spam, allow jump
+        a[1] = 1.0
+        a[6] = max(a[6], 0.7)
+        a[7] = 0.0
+        return a
+
+    if intent == "PANIC_CLEAR":
+        # emergency: more boost, immediate jump tap acceptable
+        a[1] = 1.0
+        a[6] = 1.0
+        a[5] = max(a[5], 0.6)
         a[7] = 0.0
         return a
 
