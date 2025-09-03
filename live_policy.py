@@ -1,4 +1,4 @@
-import os, numpy as np
+import os, time, numpy as np
 try:
     import torch
     TORCH_OK = True
@@ -6,29 +6,51 @@ except Exception:
     TORCH_OK = False
 
 class LivePolicy:
-    def __init__(self, path="necto-model.pt", device="cpu"):
-        self.path = path
+    """
+    Loads a TorchScript (jit) model and hot-reloads it when the file changes.
+    If primary path fails, tries fallbacks at startup.
+    """
+    def __init__(self, path="destroyer.pt", device="cpu", fallback_paths=None):
         self.device = device
+        self.path = path
+        self.fallbacks = [p for p in (fallback_paths or []) if p != path]
         self.mtime = 0.0
         self.model = None
         if TORCH_OK:
-            self._try_load()
+            self._try_load(first=True)
 
-    def _try_load(self):
-        if not TORCH_OK or not os.path.exists(self.path):
-            return
+    def _attempt_load_file(self, fpath):
+        if not os.path.exists(fpath):
+            return False
         try:
-            self.mtime = os.path.getmtime(self.path)
-            self.model = torch.jit.load(self.path, map_location=self.device).eval()
-        except Exception:
-            pass
+            m = torch.jit.load(fpath, map_location=self.device).eval()
+            self.model = m
+            self.mtime = os.path.getmtime(fpath)
+            self.path = fpath
+            print(f"[Destroyer] Loaded JIT model: {os.path.basename(fpath)} @ {time.ctime(self.mtime)}")
+            return True
+        except Exception as e:
+            print(f"[Destroyer] Skipped non-JIT or incompatible model '{fpath}': {e}")
+            return False
+
+    def _try_load(self, first=False):
+        if self._attempt_load_file(self.path):
+            return
+        for cand in self.fallbacks:
+            if self._attempt_load_file(cand):
+                return
+        if first:
+            print("[Destroyer] No loadable JIT model found; will use fallback controls.")
 
     def maybe_reload(self):
-        if not TORCH_OK or not os.path.exists(self.path):
+        if not TORCH_OK or self.model is None:
             return
-        m = os.path.getmtime(self.path)
-        if m > self.mtime:
-            self._try_load()
+        try:
+            mtime = os.path.getmtime(self.path)
+            if mtime > self.mtime:
+                self._attempt_load_file(self.path)
+        except Exception:
+            pass
 
     def act(self, obs_np: np.ndarray) -> np.ndarray:
         if not TORCH_OK or self.model is None:

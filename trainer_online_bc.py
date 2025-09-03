@@ -6,7 +6,7 @@ except Exception:
     TORCH_OK = False
 
 class OnlineBC:
-    def __init__(self, buffer, policy, out_path="necto-model.pt", step_every=3.0, batch=256, lr=2e-4):
+    def __init__(self, buffer, policy, out_path="destroyer.pt", step_every=3.0, batch=256, lr=2e-4):
         self.buffer = buffer
         self.policy = policy
         self.out_path = out_path
@@ -52,10 +52,13 @@ class OnlineBC:
             except Exception:
                 continue
 
+            # Save to the exact file the policy is currently using
+            save_target = getattr(self.policy, "path", self.out_path)
             if time.time() - last_save > self.step_every:
                 try:
-                    torch.jit.save(model, self.out_path)
+                    torch.jit.save(model, save_target)
                     last_save = time.time()
+                    print(f"[trainer] saved -> {save_target}")
                 except Exception:
                     pass
 
