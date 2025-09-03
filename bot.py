@@ -13,7 +13,7 @@ ENABLE_AERIAL_CURRICULUM = True
 ENABLE_AERIAL_DRILLS = False     # OFF first; turn ON later
 DRILL_INTERVAL_S = 7.0
 
-ENABLE_ONLINE_TRAINER = False    # OFF first; turn ON after motion confirmed
+ENABLE_ONLINE_TRAINER = True     # turn ON so we learn from fallback actions
 TRAINER_STEP_EVERY = 1.0
 TRAINER_BATCH = 512
 TRAINER_LR = 3e-4
@@ -41,8 +41,9 @@ from live_policy import LivePolicy
 from ring_buffer import RingBuffer
 from rewards_ssl import SSLReward, DEFAULT_SSL_W
 from kickoff_detector import is_kickoff_pause, detect_spawn_side, Spawn
-from speedflip import run_speedflip, SpeedFlipParams
 from trainer_online_bc import OnlineBC
+from simple_policy import HeuristicBrain
+from kickoff_strats import KickoffDirector
 
 # 107-dim obs adapter
 try:
@@ -167,13 +168,14 @@ class Destroyer(BaseAgent):
                                  fallback_paths=MODEL_PREFERENCE + ([str(src_model)] if src_model else []))
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
+        self.heur = HeuristicBrain()
 
         # kickoff tracking + correct timing (after pause)
         self.kick_prepping = False
         self.kick_active = False
         self.kick_t0 = 0.0
         self.spawn_side = Spawn.MID
-        self.kick_params = SpeedFlipParams()
+        self.ko_director = KickoffDirector(seed=self.index)
 
         # score trackers for 'done'
         self._last_blue_goals = 0
@@ -272,37 +274,59 @@ class Destroyer(BaseAgent):
         # --- Policy action
         action = self.policy.act(obs)
 
-        # --- Fallback motion if model not loaded (all zeros)
-        if (action == 0).all():
-            ball = packet.game_ball; me = packet.game_cars[self.index]
-            dx = ball.physics.location.x - me.physics.location.x
-            dy = ball.physics.location.y - me.physics.location.y
-            steer = np.clip(np.arctan2(dy, dx) / np.pi, -1, 1)
-            throttle = 1.0
-            hb = 1.0 if abs(steer) > 0.5 else 0.0
-            jump = 1.0 if ball.physics.location.z > 400 else 0.0
-            action = np.array([steer, throttle, 0, 0, 0, jump, 1.0, hb], dtype=np.float32)
+        # Decide if the model action is "weak" (all zeros, NaNs, or tiny movement):
+        weak = False
+        if not isinstance(action, np.ndarray) or action.shape[0] != 8:
+            weak = True
+        else:
+            if np.any(np.isnan(action)): weak = True
+            # very small steering & throttle mean "do nothing" → treat as weak
+            if float(np.linalg.norm(action[:2])) < 0.15 and float(np.abs(action[5])) < 0.5 and float(action[6]) < 0.5:
+                weak = True
+
+        if weak:
+            # Use heuristic controller (drives to ball and tries to score/defend)
+            action = self.heur.action(packet, self.index)
 
         ctl = to_controller(action)
 
         # --- Kickoff timing: prep during pause; execute after unpause
         gi = packet.game_info
+        # Arm during pause (but do not execute yet)
         if is_kickoff_pause(packet):
             if not self.kick_prepping:
                 self.kick_prepping = True
                 self.kick_active = False
                 self.spawn_side = detect_spawn_side(packet.game_cars[self.index])
+                # decide strategy now
+                self.ko_director.start(self.spawn_side)
         else:
+            # just left pause: start timer & run kickoff
             if self.kick_prepping:
                 self.kick_prepping = False
                 self.kick_active = True
                 self.kick_t0 = gi.seconds_elapsed
 
+        # Execute kickoff for ~1.4s after unpause using the selected strategy
         if self.kick_active:
             t_since = gi.seconds_elapsed - self.kick_t0
-            ctl = run_speedflip(packet, packet.game_cars[self.index], self.spawn_side, ctl, t_since, SpeedFlipParams())
-            if t_since > 1.2:
+            ctl = self.ko_director.run(packet, packet.game_cars[self.index], t_since, ctl)
+            if t_since > 1.4:
                 self.kick_active = False
+                # Report outcome from our last reward info (if you compute it later, you can move this)
+                # Simple heuristic: if we touched first and ball moved towards opponent, treat as "good"
+                ball = packet.game_ball
+                to_opp = 1.0 if (ball.physics.velocity.y * (-1.0 if self.team == 0 else 1.0)) > 200 else 0.0
+                scored = False
+                conceded = False
+                # quick check on immediate scoreboard delta
+                scored = (packet.teams[self.team].score > (self._last_blue_goals if self.team == 0 else self._last_orange_goals))
+                conceded = (packet.teams[1 - self.team].score > (self._last_orange_goals if self.team == 0 else self._last_blue_goals))
+                # If neither scored, use direction as proxy
+                if not scored and not conceded:
+                    if to_opp > 0.5:
+                        scored = True  # good kickoff result
+                self.ko_director.report_outcome(self.spawn_side, scored=scored, conceded=conceded)
 
         # --- Reward + buffer
         info = self._info_from_packet(packet)
