@@ -8,10 +8,10 @@ from enum import Enum
 BOT_NAME = "Destroyer"        # printed label only
 FAST_MODE = True              # hide overlay to maximize FPS
 ENABLE_AERIAL_CURRICULUM = True
-ENABLE_AERIAL_DRILLS = True   # offline only; inject aerial/double/flip scenes
+ENABLE_AERIAL_DRILLS = False  # offline only; inject aerial/double/flip scenes
 DRILL_INTERVAL_S = 7.0
 
-ENABLE_ONLINE_TRAINER = True
+ENABLE_ONLINE_TRAINER = False
 TRAINER_STEP_EVERY = 1.0      # seconds
 TRAINER_BATCH = 512
 TRAINER_LR = 3e-4
@@ -113,10 +113,10 @@ class Destroyer(BaseAgent):
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
 
         # kickoff tracking
-        self.kick_started = False
+        self.kick_prepping = False
+        self.kick_active = False
         self.kick_t0 = 0.0
         self.spawn_side = Spawn.MID
-        self.kick_params = SpeedFlipParams()
 
         # score trackers for 'done'
         self._last_blue_goals = 0
@@ -252,21 +252,53 @@ class Destroyer(BaseAgent):
         if build_obs is None:
             return SimpleControllerState()
         obs = build_obs(packet, self.index)
-        if not isinstance(obs, np.ndarray) or obs.shape[0] != 107:
+        if not isinstance(obs, np.ndarray) or obs.shape != (107,):
+            print(f"[Destroyer] bad obs shape: {None if obs is None else obs.shape}")
             return SimpleControllerState()
 
         action = self.policy.act(obs)
+
+        # If model missing -> naive chase fallback so we still move
+        if (action == 0).all():
+            ball = packet.game_ball
+            me = packet.game_cars[self.index]
+            dx = ball.physics.location.x - me.physics.location.x
+            dy = ball.physics.location.y - me.physics.location.y
+            steer = np.clip(np.arctan2(dy, dx) / np.pi, -1, 1)  # crude heading -> [-1,1]
+            throttle = 1.0
+            hb = 1.0 if abs(steer) > 0.5 else 0.0
+            jump = 1.0 if ball.physics.location.z > 400 else 0.0
+            action = np.array([steer, throttle, 0, 0, 0, jump, 1.0, hb], dtype=np.float32)
+
         ctl = to_controller(action)
 
+        # --- kickoff timing: prep during pause, execute after unpause ---
+        gi = packet.game_info
+
+        # create flags once in initialize_agent() if you don't have them yet:
+        # self.kick_prepping = False
+        # self.kick_active = False
+        # self.kick_t0 = 0.0
+
         if is_kickoff_pause(packet):
-            if not self.kick_started:
-                self.kick_started = True
-                self.kick_t0 = time.time()
+            # precompute spawn & arm the kickoff, but DON'T execute while paused
+            if not getattr(self, "kick_prepping", False):
+                self.kick_prepping = True
+                self.kick_active = False
                 self.spawn_side = detect_spawn_side(packet.game_cars[self.index])
-            t_since = time.time() - self.kick_t0
-            ctl = run_speedflip(packet, packet.game_cars[self.index], self.spawn_side, ctl, t_since, SpeedFlipParams())
         else:
-            self.kick_started = False
+            # we just left pause: start kickoff routine now
+            if getattr(self, "kick_prepping", False):
+                self.kick_prepping = False
+                self.kick_active = True
+                self.kick_t0 = gi.seconds_elapsed  # start clock at unpause
+
+        # run the routine for ~1.2s after unpause
+        if getattr(self, "kick_active", False):
+            t_since = gi.seconds_elapsed - self.kick_t0
+            ctl = run_speedflip(packet, packet.game_cars[self.index], self.spawn_side, ctl, t_since, SpeedFlipParams())
+            if t_since > 1.2:
+                self.kick_active = False
 
         info = self._info_from_packet(packet)
         if packet.game_info.is_kickoff_pause:
