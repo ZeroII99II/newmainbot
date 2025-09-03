@@ -13,6 +13,11 @@ from drills_ssl import (
     inject_ceiling_shot,
     inject_dribble_flick,
     inject_shadow_defense,
+    inject_half_flip,
+    inject_wave_dash,
+    inject_wall_nose_down,
+    inject_ceiling_reset,
+    inject_net_ramp_pop,
 )
 
 # ===== Runtime knobs =====
@@ -57,6 +62,7 @@ from simple_policy import HeuristicBrain
 from kickoff_strats import KickoffDirector
 from awareness_ssl import compute_context, nearest_big_boost
 from decision_head import guard_by_intent
+from recovery import RecoveryBrain
 
 # 107-dim obs adapter
 try:
@@ -185,6 +191,7 @@ class Destroyer(BaseAgent):
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
         self.heur = HeuristicBrain()
         self.telemetry = SkillTelemetry()
+        self.recovery = RecoveryBrain()
 
         # curriculum knobs
         self.CURRICULUM_ON = True
@@ -196,6 +203,10 @@ class Destroyer(BaseAgent):
             "aerial":    [("fast_aerial", 0.30), ("double_tap", 0.25), ("flip_reset", 0.20), ("ceiling", 0.15), ("dribble", 0.05), ("shadow", 0.05)],
             "reads":     [("shadow", 0.30), ("dribble", 0.20), ("fast_aerial", 0.15), ("double_tap", 0.15), ("flip_reset", 0.10), ("ceiling", 0.10)],
         }
+        # add recovery drills into your existing buckets
+        self.drill_probs["core"] += [("wave_dash", 0.15), ("half_flip", 0.15), ("wall_land", 0.10)]
+        self.drill_probs["reads"] += [("wall_land", 0.10), ("net_ramp", 0.10)]
+        self.drill_probs["aerial"] += [("ceiling_reset", 0.15)]
         self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
 
         # kickoff tracking + correct timing (after pause)
@@ -281,6 +292,16 @@ class Destroyer(BaseAgent):
                     inject_dribble_flick(self)
                 elif choice == "shadow":
                     inject_shadow_defense(self)
+                elif choice == "half_flip":
+                    inject_half_flip(self)
+                elif choice == "wave_dash":
+                    inject_wave_dash(self)
+                elif choice == "wall_land":
+                    inject_wall_nose_down(self)
+                elif choice == "ceiling_reset":
+                    inject_ceiling_reset(self)
+                elif choice == "net_ramp":
+                    inject_net_ramp_pop(self)
             except Exception:
                 pass
             self._last_drill_time = now
@@ -378,18 +399,16 @@ class Destroyer(BaseAgent):
         intent = ctx.get("intent", "PRESS")
         self._last_intent = intent
 
-        # 1) Ask the neural policy
-        action = self.policy.act(obs)
-
-        # 2) If model is weak, use heuristic brain with intent
-        weak = False
-        if not isinstance(action, np.ndarray) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15:
-            weak = True
-
-        if weak:
-            action = self.heur.action(packet, self.index, intent=intent)
-
-        # 3) Intent guard always applies (even for neural output) to avoid dumb overcommits etc.
+        # Try recovery override first (this is quick & safe)
+        rec_active, rec_action = self.recovery.act(packet, self.index, intent=self._last_intent if hasattr(self, "_last_intent") else None)
+        if rec_active:
+            action = rec_action
+        else:
+            action = self.policy.act(obs)
+            weak = (not isinstance(action, np.ndarray)) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15
+            if weak:
+                action = self.heur.action(packet, self.index, intent=intent)
+        # Then your existing intent guard:
         action = guard_by_intent(intent, action, ctx)
 
         # E) optional boost steering aim assist

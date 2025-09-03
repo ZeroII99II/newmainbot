@@ -176,3 +176,65 @@ def inject_shadow_defense(agent):
     agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
+def inject_half_flip(agent):
+    # Car facing away from ball, low speed
+    team = agent.team
+    car_x = _rand(-800, 800)
+    car_y = _rand(-1200, -600) if team==0 else _rand(600, 1200)
+    if team==1: car_y *= -1
+    ball_x = car_x + _rand(-200, 200)
+    ball_y = car_y + (800 * (-1 if team==0 else 1))
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 50),
+                                         rotation=Rotator(0, _rand(-3.0, 3.0), 0),
+                                         velocity=Vector3(0, 0, 0)), boost_amount=20)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, 120)))
+    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_wave_dash(agent):
+    # Small hop then land — encourage wave dash
+    team = agent.team
+    car_x = _rand(-1000, 1000)
+    car_y = _rand(-800, -200) if team==0 else _rand(200, 800)
+    if team==1: car_y *= -1
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 70),
+                                         velocity=Vector3(_rand(-200,200), _rand(-200,200), -200)))
+    agent.set_game_state(GameState(cars={agent.index: car_state}))
+
+
+def inject_wall_nose_down(agent):
+    # Place on side wall and ask for nose-down landing
+    team = agent.team
+    x = 3000 if np.random.rand() < 0.5 else -3000
+    y = _rand(-2500, 2500)
+    car_state = CarState(physics=Physics(location=Vector3(x, y, 500),
+                                         rotation=Rotator(_rand(0.3,0.6), 0.0, _rand(-1.2,1.2)),
+                                         velocity=Vector3(0,0,-300)),
+                         boost_amount=0.0)
+    agent.set_game_state(GameState(cars={agent.index: car_state}))
+
+
+def inject_ceiling_reset(agent):
+    # Ceiling contact then drop
+    team = agent.team
+    x = _rand(-800, 800)
+    y = _rand(-500, 500) * (-1 if team==0 else 1)
+    car_state = CarState(physics=Physics(location=Vector3(x, y, 1980),
+                                         rotation=Rotator(0.0, 0.0, 0.0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=20)
+    agent.set_game_state(GameState(cars={agent.index: car_state}))
+
+
+def inject_net_ramp_pop(agent):
+    # Inside goal ramp, encourage ramp pop/reset
+    team = agent.team
+    y = -5050 if team==0 else 5050
+    x = _rand(-700, 700)
+    car_state = CarState(physics=Physics(location=Vector3(x, y, 120),
+                                         rotation=Rotator(0.0, 0.0, 0.0),
+                                         velocity=Vector3(0,0,50)),
+                         boost_amount=0.0)
+    agent.set_game_state(GameState(cars={agent.index: car_state}))
+
+
