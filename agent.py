@@ -1,6 +1,6 @@
-import os, math
-import numpy as np
+import math, os, numpy as np
 
+# Torch is optional: bot must still load without it
 try:
     import torch
     import torch.nn.functional as F
@@ -8,21 +8,24 @@ try:
     TORCH_OK = True
 except Exception:
     TORCH_OK = False
-    # Provide stubs so the rest of the file parses if torch is missing
+    torch = None
+    F = None
     class Categorical:
-        def __init__(self, logits):
-            pass
-        def sample(self):
-            return None
+        def __init__(self, logits): pass
+        def sample(self): return None
+
 
 class Agent:
     def __init__(self):
         cur_dir = os.path.dirname(os.path.realpath(__file__))
+
+        # Look for a model in these common names/locations
         candidates = [
             os.path.join(cur_dir, "models", "destroyer_Bronze_latest.pt"),
             os.path.join(cur_dir, "destroyer_Bronze_latest.pt"),
             os.path.join(cur_dir, "nexto-model.pt"),
         ]
+
         self.actor = None
         if TORCH_OK:
             for path in candidates:
@@ -33,10 +36,8 @@ class Agent:
                         break
                     except Exception:
                         pass
-            if self.actor is None:
-                # No model available; we'll run Bronze heuristics instead
-                pass
-            torch.set_num_threads(1)
+            if self.actor is not None:
+                torch.set_num_threads(1)
 
         self._lookup_table = self.make_lookup_table()
         self.state = None
@@ -52,16 +53,18 @@ class Agent:
         return table
 
     def act(self, state, beta):
-        if not TORCH_OK or self.actor is None:
-            return None, None  # tell bot.py to use Bronze heuristics
+        # If we don't have a model (or torch), let bot.py fall back to heuristics
+        if (not TORCH_OK) or (self.actor is None):
+            return None, None
 
+        import math
         state = tuple(torch.from_numpy(s).float() for s in state)
         with torch.no_grad():
             out, weights = self.actor(state)
-        self.state = state
 
         out = (out,)
         max_shape = max(o.shape[-1] for o in out)
+        import torch.nn.functional as F
         logits = torch.stack(
             [l if l.shape[-1] == max_shape else F.pad(l, (0, max_shape - l.shape[-1]), value=float("-inf"))],
             dim=1
@@ -81,3 +84,4 @@ class Agent:
 
         parsed = self._lookup_table[actions.numpy().item()]
         return parsed, weights
+
