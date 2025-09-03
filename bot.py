@@ -2,8 +2,18 @@
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
 import numpy as np, math, time
+import numpy as _np
 from enum import Enum
 from autosave import ModelAutoSaver
+from mechanics_ssl import SkillTelemetry
+from drills_ssl import (
+    inject_fast_aerial,
+    inject_double_tap,
+    inject_flip_reset,
+    inject_ceiling_shot,
+    inject_dribble_flick,
+    inject_shadow_defense,
+)
 
 # ===== Runtime knobs =====
 BOT_NAME = "Destroyer"
@@ -172,6 +182,19 @@ class Destroyer(BaseAgent):
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
         self.heur = HeuristicBrain()
+        self.telemetry = SkillTelemetry()
+
+        # curriculum knobs
+        self.CURRICULUM_ON = True
+        self._last_drill_time = 0.0
+        self.DRILL_INTERVAL_S = 8.0
+        # probabilities per curriculum phase (core / aerial / reads)
+        self.drill_probs = {
+            "core":      [("dribble", 0.35), ("shadow", 0.25), ("fast_aerial", 0.15), ("double_tap", 0.10), ("flip_reset", 0.05), ("ceiling", 0.10)],
+            "aerial":    [("fast_aerial", 0.30), ("double_tap", 0.25), ("flip_reset", 0.20), ("ceiling", 0.15), ("dribble", 0.05), ("shadow", 0.05)],
+            "reads":     [("shadow", 0.30), ("dribble", 0.20), ("fast_aerial", 0.15), ("double_tap", 0.15), ("flip_reset", 0.10), ("ceiling", 0.10)],
+        }
+        self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
 
         # kickoff tracking + correct timing (after pause)
         self.kick_prepping = False
@@ -188,7 +211,6 @@ class Destroyer(BaseAgent):
         self._backboard_ping_time = 0.0
         self._last_car_airborne = False
         self._last_double_jump = False
-        self._last_drill_time = 0.0
 
         # optional online BC trainer (OFF by default; turn on after motion confirmed)
         self._trainer = None
@@ -216,6 +238,48 @@ class Destroyer(BaseAgent):
             self._autosaver.stop()
         if getattr(self, "_trainer", None):
             self._trainer.stop()
+
+    def _sample_drill(self):
+        plist = self.drill_probs.get(self.curriculum_phase, [])
+        if not plist:
+            return None
+        names, weights = zip(*plist)
+        p = _np.array(weights, dtype=_np.float32)
+        p = p / p.sum()
+        return _np.random.choice(names, p=p)
+
+    def _maybe_inject_ssl_drill(self, packet):
+        if not self.CURRICULUM_ON or packet.game_info.is_kickoff_pause:
+            return
+        now = packet.game_info.seconds_elapsed
+        ball = packet.game_ball
+        speed = float(_np.linalg.norm([
+            ball.physics.velocity.x,
+            ball.physics.velocity.y,
+            ball.physics.velocity.z,
+        ]))
+        if (
+            speed < 200
+            and ball.physics.location.z < 120
+            and (now - self._last_drill_time) > self.DRILL_INTERVAL_S
+        ):
+            choice = self._sample_drill()
+            try:
+                if choice == "fast_aerial":
+                    inject_fast_aerial(self)
+                elif choice == "double_tap":
+                    inject_double_tap(self)
+                elif choice == "flip_reset":
+                    inject_flip_reset(self)
+                elif choice == "ceiling":
+                    inject_ceiling_shot(self)
+                elif choice == "dribble":
+                    inject_dribble_flick(self)
+                elif choice == "shadow":
+                    inject_shadow_defense(self)
+            except Exception:
+                pass
+            self._last_drill_time = now
 
     def _info_from_packet(self, packet) -> dict:
         info = {}
@@ -263,6 +327,13 @@ class Destroyer(BaseAgent):
         info["own_goal_touch"] = 0.0
         info["idle_ticks"] = 0.0
         info["kickoff_score"] = 0.0
+
+        try:
+            tel = self.telemetry.update(packet, self.index)
+            if tel:
+                info.update(tel)
+        except Exception:
+            pass
 
         self._last_car_airborne = _car_airborne(my)
         self._last_double_jump = _double_jumped(my)
@@ -358,6 +429,8 @@ class Destroyer(BaseAgent):
         reward = self.reward_fn(info)
         done = bool(info["scored"] > 0.5)
         self.buffer.push(obs, action.astype(np.float32), reward, done)
+
+        self._maybe_inject_ssl_drill(packet)
 
         # update scores
         self._last_blue_goals = packet.teams[0].score

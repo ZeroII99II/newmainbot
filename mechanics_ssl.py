@@ -1,0 +1,238 @@
+# mechanics_ssl.py — SSL mechanics detectors / telemetry (best-effort heuristics)
+import math, numpy as np
+
+
+def _hyp2(x, y):
+    return float(math.hypot(x, y))
+
+
+def _vec2(x, y):
+    return np.array([float(x), float(y)], dtype=np.float32)
+
+
+def _yaw(rot):
+    return float(rot.yaw)
+
+
+def _pitch(rot):
+    return float(rot.pitch)
+
+
+def _roll(rot):
+    return float(rot.roll)
+
+
+class SkillTelemetry:
+    """
+    Produces a dict of features indicating attempts / successes for SSL-relevant mechanics.
+    Heuristic & tolerant: robust to missing fields; never crashes.
+    """
+
+    def __init__(self):
+        # memory across ticks
+        self._last_touch_me = False
+        self._last_ball_loc = np.zeros(3, dtype=np.float32)
+        self._last_my_on_wall = False
+        self._last_on_ceiling = False
+        self._air_chain_touch = 0
+        self._ground_carry_ticks = 0
+        self._dribble_ticks = 0
+        self._recent_powerslide = 0
+        self._recent_wavedash = 0
+        self._recent_chain_dash = 0
+        self._recent_stall = 0
+        self._recent_fake = 0
+        self._touch_quality_prev_speed = 0.0
+
+    @staticmethod
+    def _is_on_wall(loc, rot):
+        # Rough wall test: near side walls/backboard and car not upright
+        return (abs(loc.x) > 3000 or abs(loc.y) > 4800) and abs(_pitch(rot)) + abs(_roll(rot)) > 0.35
+
+    @staticmethod
+    def _is_on_ceiling(loc, has_wheel_contact):
+        # Ceiling z ~ 2044; treat >1900 and wheel contact as ceiling
+        try:
+            return has_wheel_contact and loc.z > 1900
+        except Exception:
+            return loc.z > 1900
+
+    @staticmethod
+    def _ball_speed(ball):
+        v = ball.physics.velocity
+        return float(np.linalg.norm([v.x, v.y, v.z]))
+
+    def update(self, packet, index):
+        info = {}
+        try:
+            ball = packet.game_ball
+            me = packet.game_cars[index]
+            team = me.team
+        except Exception:
+            return {}
+
+        # Basic vectors
+        my_loc = me.physics.location
+        my_rot = me.physics.rotation
+        my_vel = me.physics.velocity
+        ball_loc = ball.physics.location
+        ball_vel = ball.physics.velocity
+        my_xy = _vec2(my_loc.x, my_loc.y)
+        ball_xy = _vec2(ball_loc.x, ball_loc.y)
+        dist_xy = float(np.linalg.norm(ball_xy - my_xy))
+        my_spd = float(np.linalg.norm([my_vel.x, my_vel.y, my_vel.z]))
+        ball_spd = float(np.linalg.norm([ball_vel.x, ball_vel.y, ball_vel.z]))
+
+        # --- Core mechanics ---
+        # Fast aerial attempt: takeoff (no wheel contact) + strong vertical vel + heading toward ball
+        try:
+            airborne = (not me.has_wheel_contact) and my_loc.z > 150
+        except Exception:
+            airborne = my_loc.z > 150
+        info["fast_aerial_attempt"] = 1.0 if (airborne and abs(my_vel.z) > 450 and dist_xy < 2300) else 0.0
+
+        # Advanced recoveries: powerslide/wavedash/chain-dash proxies
+        # We can't read inputs; use angular bursts + quick land-boost changes as hints
+        ang = me.physics.angular_velocity
+        ang_mag = float(np.linalg.norm([ang.x, ang.y, ang.z]))
+        # count brief high-angle recoveries near ground
+        if my_loc.z < 120 and (ang_mag > 3.8 or abs(_yaw(my_rot)) > 2.8):
+            self._recent_powerslide = min(30, self._recent_powerslide + 1)
+        else:
+            self._recent_powerslide = max(0, self._recent_powerslide - 1)
+        info["adv_recovery"] = 1.0 if self._recent_powerslide > 0 else 0.0
+
+        # Wavedash/chain-dash proxies: jump impulses followed by ground speed spikes
+        if my_loc.z < 40 and abs(my_vel.z) < 20 and my_spd > 1700:
+            self._recent_wavedash = min(30, self._recent_wavedash + 1)
+        else:
+            self._recent_wavedash = max(0, self._recent_wavedash - 1)
+        info["zap_chain_dash"] = 1.0 if self._recent_wavedash > 0 else 0.0
+
+        # Wall play: touching ball near wall/backboard at height
+        on_wall = self._is_on_wall(my_loc, my_rot)
+        wall_play = on_wall and ball_loc.z > 200 and (abs(ball_loc.x) > 2800 or abs(ball_loc.y) > 4800)
+        info["wall_play"] = 1.0 if wall_play else 0.0
+
+        # Basic dribble & flicks: ball slow & near hood; then quick jump/dodge upward for power
+        under_ball = (
+            abs(ball_loc.x - my_loc.x) < 120
+            and abs(ball_loc.y - my_loc.y) < 120
+            and 60 < (ball_loc.z - my_loc.z) < 220
+        )
+        carrying = under_ball and ball_spd < 1200 and my_spd < 1700
+        self._dribble_ticks = self._dribble_ticks + 1 if carrying else 0
+        info["dribble_carry"] = 1.0 if self._dribble_ticks > 10 else 0.0  # ~> ~0.16s carry
+
+        # Flick proxy: sudden positive ball dz after a short carry window
+        dz = ball_vel.z
+        info["flick_power"] = float(max(0.0, min(1.0, (dz - 550.0) / 900.0))) if self._dribble_ticks > 8 else 0.0
+
+        # Shadow defense: align behind ball toward our goal, keeping spacing
+        goal_y = -5120 if team == 0 else 5120
+        to_goal = _vec2(0 - my_loc.x, goal_y - my_loc.y)
+        to_ball = _vec2(ball_loc.x - my_loc.x, ball_loc.y - my_loc.y)
+        dot = float(np.dot(to_goal, to_ball) / (np.linalg.norm(to_goal) * np.linalg.norm(to_ball) + 1e-6))
+        shadow_angle = 0.5 * dot  # rough proxy
+        shadow_dist_ok = 600 < dist_xy < 2200
+        info["shadow_good"] = 1.0 if (shadow_dist_ok and shadow_angle > 0.5) else 0.0
+
+        # Perfect first touches: first touch after a while that accelerates ball toward opponent goal with control (not blasted)
+        try:
+            lt = ball.latest_touch
+            latest_touch_me = lt.player_index == index
+        except Exception:
+            latest_touch_me = False
+        accel = max(0.0, ball_spd - self._ball_speed_prev if hasattr(self, "_ball_speed_prev") else 0.0)
+        towards_opp = (ball_vel.y * (-1.0 if team == 0 else 1.0)) > 0
+        controlled = ball_spd < 2500
+        info["perfect_touch"] = 1.0 if (latest_touch_me and accel > 200 and towards_opp and controlled) else 0.0
+
+        # Kickoff success proxy (used by director separately but we mirror here)
+        info["kickoff_first_touch"] = (
+            1.0
+            if (
+                latest_touch_me
+                and packet.game_info.is_kickoff_pause == False
+                and packet.game_info.seconds_elapsed < 3.0
+            )
+            else 0.0
+        )
+
+        # --- Advanced aerial mechanics ---
+        # Air dribble: multiple midair touches within ~1.2s, z>600
+        if airborne and ball_loc.z > 600 and latest_touch_me:
+            self._air_chain_touch += 1
+        elif not airborne:
+            self._air_chain_touch = 0
+        info["air_dribble_chain"] = float(min(1.0, self._air_chain_touch / 3.0))
+
+        # Flip reset: midair contact near the car's wheels region & subsequent second dodge opportunity proxy
+        # Heuristic: touch at z>900 with car pitched slightly up and vertical speed decreasing
+        pitch = _pitch(my_rot)
+        info["flip_reset_attempt"] = (
+            1.0
+            if (
+                airborne and ball_loc.z > 900 and abs(pitch) < 0.6 and latest_touch_me and my_vel.z < 0
+            )
+            else 0.0
+        )
+
+        # Ceiling shot: was on ceiling then aerial touch soon after
+        on_ceiling = self._is_on_ceiling(my_loc, getattr(me, "has_wheel_contact", False))
+        info["ceiling_setup"] = (
+            1.0 if (self._last_on_ceiling and airborne and ball_loc.z > 700) else 0.0
+        )
+        self._last_on_ceiling = on_ceiling
+
+        # Musty & double tap proxies
+        # Musty: backflip-ish contact (pitch negative) with ball above front after a small carry
+        info["musty_attempt"] = (
+            1.0
+            if (
+                latest_touch_me
+                and self._dribble_ticks > 8
+                and pitch < -0.4
+                and ball_loc.z > my_loc.z + 120
+            )
+            else 0.0
+        )
+        # Double tap: backboard hit then next touch within ~1.2s
+        backboard = (abs(ball_loc.y) > 5000 and ball_loc.z > 1200)
+        if backboard:
+            self._backboard_time = packet.game_info.seconds_elapsed
+        last_bb = getattr(self, "_backboard_time", -9e9)
+        info["double_tap_attempt"] = (
+            1.0
+            if (
+                latest_touch_me
+                and packet.game_info.seconds_elapsed - last_bb < 1.2
+            )
+            else 0.0
+        )
+
+        # Ultra-efficient reads: stalls (flip cancel midair) and deception proxies (approach then abort)
+        # Stall proxy: airborne with low angular vel after flip (hard to observe; integrate loosely)
+        angv = float(np.linalg.norm([ang.x, ang.y, ang.z]))
+        info["stall_proxy"] = (
+            1.0 if (airborne and angv < 1.0 and my_spd > 800 and ball_loc.z > 700) else 0.0
+        )
+
+        # Deception proxy: approach then sudden throttle-down causing opponent touch miss, followed by our possession
+        # Without opponent state, use ball speed drop then our touch within 0.7s
+        bs_drop = (
+            self._ball_speed_prev - ball_spd if hasattr(self, "_ball_speed_prev") else 0.0
+        )
+        if bs_drop > 400 and latest_touch_me:
+            self._recent_fake = min(30, self._recent_fake + 1)
+        else:
+            self._recent_fake = max(0, self._recent_fake - 1)
+        info["deception_fake"] = 1.0 if self._recent_fake > 0 else 0.0
+
+        # store for next tick
+        self._ball_speed_prev = ball_spd
+        self._last_touch_me = latest_touch_me
+        return info
+
+    # end update
+
