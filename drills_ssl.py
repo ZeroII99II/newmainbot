@@ -37,7 +37,8 @@ def inject_fast_aerial(agent):
             velocity=Vector3(bvx, bvy, bvz),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_double_tap(agent):
@@ -63,7 +64,8 @@ def inject_double_tap(agent):
             velocity=Vector3(0, bvy, _rand(-150, 50)),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_flip_reset(agent):
@@ -90,7 +92,8 @@ def inject_flip_reset(agent):
             velocity=Vector3(_rand(-150, 150), _rand(-150, 150), _rand(-150, 50)),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_ceiling_shot(agent):
@@ -115,7 +118,8 @@ def inject_ceiling_shot(agent):
             velocity=Vector3(_rand(-100, 100), _rand(-100, 100), _rand(-50, 150)),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_dribble_flick(agent):
@@ -142,7 +146,8 @@ def inject_dribble_flick(agent):
             velocity=Vector3(0, 0, 0),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_shadow_defense(agent):
@@ -173,7 +178,8 @@ def inject_shadow_defense(agent):
             velocity=Vector3(_rand(-200, 200), _rand(-100, 100), 0),
         )
     )
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_half_flip(agent):
@@ -188,7 +194,8 @@ def inject_half_flip(agent):
                                          rotation=Rotator(0, _rand(-3.0, 3.0), 0),
                                          velocity=Vector3(0, 0, 0)), boost_amount=20)
     ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, 120)))
-    agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
 def inject_wave_dash(agent):
@@ -199,7 +206,8 @@ def inject_wave_dash(agent):
     if team==1: car_y *= -1
     car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 70),
                                          velocity=Vector3(_rand(-200,200), _rand(-200,200), -200)))
-    agent.set_game_state(GameState(cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 
 def inject_wall_nose_down(agent):
@@ -211,7 +219,8 @@ def inject_wall_nose_down(agent):
                                          rotation=Rotator(_rand(0.3,0.6), 0.0, _rand(-1.2,1.2)),
                                          velocity=Vector3(0,0,-300)),
                          boost_amount=0.0)
-    agent.set_game_state(GameState(cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 
 def inject_ceiling_reset(agent):
@@ -223,7 +232,8 @@ def inject_ceiling_reset(agent):
                                          rotation=Rotator(0.0, 0.0, 0.0),
                                          velocity=Vector3(0,0,0)),
                          boost_amount=20)
-    agent.set_game_state(GameState(cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 
 def inject_net_ramp_pop(agent):
@@ -235,6 +245,7 @@ def inject_net_ramp_pop(agent):
                                          rotation=Rotator(0.0, 0.0, 0.0),
                                          velocity=Vector3(0,0,50)),
                          boost_amount=0.0)
-    agent.set_game_state(GameState(cars={agent.index: car_state}))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 

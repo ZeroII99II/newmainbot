@@ -248,11 +248,44 @@ class Destroyer(BaseAgent):
         self._game_last = 0.0
         self._slow_warned = False
 
+        self._state_setting_ok = None
+        self._state_probe_t0 = 0.0
+        self._state_probe_ball_z0 = None
+
     def retire(self):
         if getattr(self, "_autosaver", None):
             self._autosaver.stop()
         if getattr(self, "_trainer", None):
             self._trainer.stop()
+
+    def _probe_state_setting(self, packet):
+        """
+        One-time self-test: nudge ball Z by +50, then verify next tick.
+        Sets self._state_setting_ok = True/False and stops probing.
+        """
+        try:
+            gi = packet.game_info
+            if gi is None or gi.is_kickoff_pause:
+                return
+            from rlbot.utils.game_state_util import GameState, BallState, Physics, Vector3
+            # Start probe
+            if self._state_setting_ok is None and self._state_probe_t0 == 0.0:
+                self._state_probe_ball_z0 = packet.game_ball.physics.location.z
+                z = self._state_probe_ball_z0 + 50.0
+                self.set_game_state(GameState(ball=BallState(physics=Physics(location=Vector3(0, 0, z)))))
+                self._state_probe_t0 = gi.seconds_elapsed
+                return
+            # Verify after ~0.15s
+            if self._state_setting_ok is None and self._state_probe_t0 > 0.0:
+                if gi.seconds_elapsed - self._state_probe_t0 > 0.15:
+                    z_now = packet.game_ball.physics.location.z
+                    # Consider success if Z moved at least ~20 units
+                    self._state_setting_ok = bool(abs(z_now - self._state_probe_ball_z0) > 20.0)
+                    msg = "ENABLED" if self._state_setting_ok else "DISABLED"
+                    print(f"[Destroyer] State setting probe: {msg}")
+        except Exception:
+            # If anything goes wrong, assume disabled to be safe
+            self._state_setting_ok = False
 
     def _sample_drill(self):
         plist = self.drill_probs.get(self.curriculum_phase, [])
@@ -367,6 +400,8 @@ class Destroyer(BaseAgent):
     # (Aerial drills exist in earlier versions; left off until motion confirmed)
 
     def get_output(self, packet) -> SimpleControllerState:
+        if packet is not None:
+            self._probe_state_setting(packet)
         now = time.time()
         gi = packet.game_info if packet is not None else None
         if gi is not None:
@@ -487,7 +522,8 @@ class Destroyer(BaseAgent):
         done = bool(info["scored"] > 0.5)
         self.buffer.push(obs, action.astype(np.float32), reward, done)
 
-        self._maybe_inject_ssl_drill(packet)
+        if getattr(self, "_state_setting_ok", False):
+            self._maybe_inject_ssl_drill(packet)
 
         # update scores
         self._last_blue_goals = packet.teams[0].score
