@@ -44,7 +44,7 @@ class HeuristicBrain:
         n = np.linalg.norm(d) + 1e-6
         return b - d / n * approach_dist
 
-    def action(self, packet, index) -> np.ndarray:
+    def action(self, packet, index, intent: str = None) -> np.ndarray:
         me = packet.game_cars[index]
         ball = packet.game_ball
         team = me.team
@@ -98,7 +98,7 @@ class HeuristicBrain:
         ):
             jump = 1.0
 
-        return np.array(
+        a = np.array(
             [
                 float(steer),
                 float(throttle),
@@ -111,4 +111,15 @@ class HeuristicBrain:
             ],
             dtype=np.float32,
         )
+
+        # Intent shaping (lightweight): SHADOW/BOOST/DRIBBLE
+        if intent:
+            up = intent.upper()
+            if up == "SHADOW":
+                a[6] = 0.0; a[1] = max(0.5, a[1]); a[7] = 0.0; a[5] = 0.0
+            elif up == "BOOST":
+                a[1] = 1.0; a[6] = 1.0; a[5] = 0.0; a[7] = 0.0
+            elif up in ("DRIBBLE","CONTROL"):
+                a[1] = min(a[1], 0.7); a[6] = min(a[6], 0.3); a[5] = min(a[5], 0.5)
+        return a
 

@@ -55,6 +55,8 @@ from kickoff_detector import is_kickoff_pause, detect_spawn_side, Spawn
 from trainer_online_bc import OnlineBC
 from simple_policy import HeuristicBrain
 from kickoff_strats import KickoffDirector
+from awareness_ssl import compute_context, nearest_big_boost
+from decision_head import guard_by_intent
 
 # 107-dim obs adapter
 try:
@@ -202,6 +204,8 @@ class Destroyer(BaseAgent):
         self.kick_t0 = 0.0
         self.spawn_side = Spawn.MID
         self.ko_director = KickoffDirector(seed=self.index)
+        self._boost_target = None
+        self._last_intent = "PRESS"
 
         # score trackers for 'done'
         self._last_blue_goals = 0
@@ -364,23 +368,47 @@ class Destroyer(BaseAgent):
         if not isinstance(obs, np.ndarray) or obs.shape[0] != 107:
             print(f"[Destroyer] bad obs shape: {None if not isinstance(obs, np.ndarray) else obs.shape}")
             return SimpleControllerState()
+        # --- Awareness / context -> intent
+        ctx = {}
+        try:
+            ctx = compute_context(packet, self.index)
+        except Exception:
+            ctx = {}
 
-        # --- Policy action
+        intent = ctx.get("intent", "PRESS")
+        self._last_intent = intent
+
+        # 1) Ask the neural policy
         action = self.policy.act(obs)
 
-        # Decide if the model action is "weak" (all zeros, NaNs, or tiny movement):
+        # 2) If model is weak, use heuristic brain with intent
         weak = False
-        if not isinstance(action, np.ndarray) or action.shape[0] != 8:
+        if not isinstance(action, np.ndarray) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15:
             weak = True
-        else:
-            if np.any(np.isnan(action)): weak = True
-            # very small steering & throttle mean "do nothing" → treat as weak
-            if float(np.linalg.norm(action[:2])) < 0.15 and float(np.abs(action[5])) < 0.5 and float(action[6]) < 0.5:
-                weak = True
 
         if weak:
-            # Use heuristic controller (drives to ball and tries to score/defend)
-            action = self.heur.action(packet, self.index)
+            action = self.heur.action(packet, self.index, intent=intent)
+
+        # 3) Intent guard always applies (even for neural output) to avoid dumb overcommits etc.
+        action = guard_by_intent(intent, action, ctx)
+
+        # E) optional boost steering aim assist
+        if intent == "BOOST":
+            try:
+                target = ctx.get("nearest_big_boost", None)
+                if target is not None:
+                    me = packet.game_cars[self.index]
+                    dx = float(target[0] - me.physics.location.x)
+                    dy = float(target[1] - me.physics.location.y)
+                    desired_yaw = math.atan2(dy, dx)
+                    cur_yaw = float(me.physics.rotation.yaw)
+                    ang = desired_yaw - cur_yaw
+                    while ang > math.pi: ang -= 2*math.pi
+                    while ang < -math.pi: ang += 2*math.pi
+                    steer_bias = float(np.clip(2.0*ang - 0.6*getattr(me.physics.angular_velocity,"z",0.0), -1.0, 1.0))
+                    action[0] = float(np.clip(0.7*action[0] + 0.3*steer_bias, -1.0, 1.0))
+            except Exception:
+                pass
 
         ctl = to_controller(action)
 
@@ -424,6 +452,16 @@ class Destroyer(BaseAgent):
 
         # --- Reward + buffer
         info = self._info_from_packet(packet)
+        try:
+            if ctx:
+                info.update(dict(
+                    pressure_idx=ctx.get("pressure_idx", 0.0),
+                    possession_idx=ctx.get("possession_idx", 0.0),
+                    recovery_ok=ctx.get("recovery_ok", False),
+                    overcommit_flag=ctx.get("overcommit_flag", 0.0),
+                ))
+        except Exception:
+            pass
         if packet.game_info.is_kickoff_pause:
             info["kickoff_score"] = 0.2
         reward = self.reward_fn(info)
@@ -442,6 +480,10 @@ class Destroyer(BaseAgent):
                 r = self.renderer
                 n = self.buffer.capacity if self.buffer.full else self.buffer.ptr
                 r.draw_string_2d(10, 10, 1, 1, f"{BOT_NAME} | Idx {self.index} | Buf {n}/{self.buffer.capacity}", r.white())
+            except Exception:
+                pass
+            try:
+                self.renderer.draw_string_2d(10, 28, 1, 1, f"Intent: {self._last_intent}", self.renderer.yellow())
             except Exception:
                 pass
 

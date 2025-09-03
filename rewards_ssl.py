@@ -34,6 +34,10 @@ DEFAULT_SSL_W = {
     "concede": 1.00,
     "idle": 0.05,
     "kickoff": 0.22,
+    "pressure_awareness": 0.25,
+    "possession_awareness": 0.20,
+    "recovery_ok": 0.20,
+    "overcommit_flag_pen": 0.35,
 }
 
 
@@ -78,6 +82,12 @@ class SSLReward:
         r += g["goal"] * info.get("scored", 0.0)
         r -= g["concede"] * info.get("conceded", 0.0)
         r -= g["idle"] * info.get("idle_ticks", 0.0)
+
+        # Awareness taps
+        r += g["pressure_awareness"]   * info.get("pressure_idx", 0.0)
+        r += g["possession_awareness"] * info.get("possession_idx", 0.0)
+        r += g["recovery_ok"]          * (1.0 if info.get("recovery_ok", False) else 0.0)
+        r -= g["overcommit_flag_pen"]  * info.get("overcommit_flag", 0.0)
 
         return float(max(-1.0, min(1.0, r)))
 
