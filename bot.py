@@ -79,7 +79,7 @@ from finisher import FinisherBrain
 from danger_clear import DangerClearBrain
 from curriculum import STAGES, LOWER_IS_BETTER, combine_reward_boosts
 from progress_store import ProgressStore
-from hud_overlay import draw_hud
+from overlay_pro import draw_overlay
 
 # 107-dim obs adapter
 try:
@@ -277,7 +277,6 @@ class Destroyer(BaseAgent):
         self._progress = 0.0
         self._progress_last_pass_t = 0.0
         self._last_overlay_time = 0.0
-        self._hud_on = True  # toggle via FAST_MODE if needed
 
         # cache a baseline of reward weights if you have them exposed; ok if empty
         self._base_reward_weights = dict(getattr(self, "reward_weights", {})) if hasattr(self, "reward_weights") else {}
@@ -757,15 +756,33 @@ class Destroyer(BaseAgent):
                 pass
 
         try:
-            show_hud = (not FAST_MODE) and self._hud_on
+            show_hud = (not FAST_MODE)
             if show_hud and self.renderer is not None:
-                # Build a short "reasons" string from ctx
-                rP = float(ctx.get("pressure_idx", 0.0))
-                rT = float(ctx.get("threat_idx", 0.0))
-                dz = int(1 if ctx.get("danger_zone", False) else 0)
-                reasons = f"P:{rP:.2f} T:{rT:.2f} DZ:{dz} EXP:{int(ctx.get('exploit_window',0))} FIN:{getattr(self,'_last_finish','')}"
-                stage_name = STAGES[self.academy.stage_idx].name
-                draw_hud(self.renderer, 10, 24, stage_name, intent, reasons, self._progress, sample_out)
+                car = packet.game_cars[self.index]
+                stage_name = STAGES[self.academy.stage_idx].name if hasattr(self, "academy") else "—"
+                progress = float(getattr(self, "_progress", 0.0))
+                reasons = (
+                    f"P:{float(ctx.get('pressure_idx',0.0)):.2f} "
+                    f"T:{float(ctx.get('threat_idx',0.0)):.2f} "
+                    f"ΔBoost:{float(ctx.get('boost_delta',0.0)):+.0f} "
+                    f"DZ:{int(bool(ctx.get('danger_zone',False)))} "
+                    f"EXP:{int(bool(ctx.get('exploit_window',False)))}"
+                )
+                last_attempt = getattr(self, "_last_finish", "") or info.get("finisher_choice", "") or ""
+                draw_overlay(
+                    self.renderer,
+                    x=12, y=16,
+                    bot_name="Destroyer",
+                    stage=stage_name,
+                    progress=progress,
+                    intent=str(intent),
+                    reasons=reasons,
+                    last_attempt=last_attempt,
+                    boost=float(getattr(car, "boost", 33.0)),
+                    action8=action,
+                    exploit=bool(ctx.get("exploit_window", False)),
+                    danger=bool(ctx.get("danger_zone", False)),
+                )
         except Exception:
             pass
 
