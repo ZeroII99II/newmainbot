@@ -3,6 +3,7 @@ from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
 import numpy as np, math, time
 from enum import Enum
+from autosave import ModelAutoSaver
 
 # ===== Runtime knobs =====
 BOT_NAME = "Destroyer"
@@ -166,6 +167,8 @@ class Destroyer(BaseAgent):
 
         self.policy = LivePolicy(path=WORKING_MODEL, device="cpu",
                                  fallback_paths=MODEL_PREFERENCE + ([str(src_model)] if src_model else []))
+        self._autosaver = ModelAutoSaver(self.policy, interval_sec=300, checkpoint_dir="checkpoints", max_keep=12)
+        self._autosaver.start()
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
         self.heur = HeuristicBrain()
@@ -203,8 +206,15 @@ class Destroyer(BaseAgent):
 
         print(f"{BOT_NAME} Ready - Index: {self.index}")
 
+        # wall/game time watchdog to detect slow-mo matches
+        self._wall_last = time.time()
+        self._game_last = 0.0
+        self._slow_warned = False
+
     def retire(self):
-        if self._trainer:
+        if getattr(self, "_autosaver", None):
+            self._autosaver.stop()
+        if getattr(self, "_trainer", None):
             self._trainer.stop()
 
     def _info_from_packet(self, packet) -> dict:
@@ -261,6 +271,19 @@ class Destroyer(BaseAgent):
     # (Aerial drills exist in earlier versions; left off until motion confirmed)
 
     def get_output(self, packet) -> SimpleControllerState:
+        now = time.time()
+        gi = packet.game_info if packet is not None else None
+        if gi is not None:
+            dt_wall = now - self._wall_last
+            dt_game = gi.seconds_elapsed - self._game_last if self._game_last else 0.0
+            if dt_wall > 0.5 and dt_game > 0:
+                ratio = dt_game / dt_wall  # ~1.0 when normal speed
+                if ratio < 0.9 and not self._slow_warned:
+                    print("[Destroyer] Detected slow game time (ratio ~{:.2f}). Check RL Mutators: Game Speed=Default; disable timewarp plugins.".format(ratio))
+                    self._slow_warned = True
+            self._wall_last = now
+            self._game_last = gi.seconds_elapsed
+
         if packet is None or packet.game_info is None:
             return SimpleControllerState()
 
