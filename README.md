@@ -18,3 +18,11 @@ If RLBot prompts for packages, let it install `rlbot` and `numpy`.
 - `drills_bronze.py` – simple state-setting spawns (requires `enable_state_setting=True`)
 - `overlay_bronze.py` – small HUD overlay
 - `destroyer.cfg`, `rlbot.cfg`, `requirements.txt`
+
+## Training & Resume
+- Config: `train.cfg`
+- Latest model: `models/destroyer_Bronze_latest.pt` (+ `.opt` and `*_meta.json`)
+- Rotating history: `checkpoints/`
+- **No torch installed?** The bot runs heuristics and logs metadata; once you install torch, it will start saving `.pt` files and using the trainer. Set `use_model_for_action=true` to let the policy drive instead of heuristics.
+
+To resume after closing RLBot, just start the match again — the trainer auto-loads `*_latest.pt`.
