@@ -1,7 +1,7 @@
 # decision_head.py — intent guards that shape/control actions
 import numpy as np
 
-INTENTS = {"PRESS","CONTROL","CHALLENGE","SHADOW","BOOST","CLEAR","DRIBBLE","SHOOT","FAKE","ROTATE_BACK_POST","STARVE","BUMP"}
+INTENTS = {"PRESS","CONTROL","CHALLENGE","SHADOW","BOOST","CLEAR","DRIBBLE","SHOOT","FAKE","ROTATE_BACK_POST","STARVE","BUMP","AIR_DRIBBLE","BACKBOARD_DEFEND"}
 
 def guard_by_intent(intent: str, action: np.ndarray, ctx: dict) -> np.ndarray:
     """
@@ -63,6 +63,20 @@ def guard_by_intent(intent: str, action: np.ndarray, ctx: dict) -> np.ndarray:
         a[1] = min(a[1], 0.2)
         a[6] = 0.0
         a[5] = 0.0
+        return a
+
+    if intent == "AIR_DRIBBLE":
+        # smooth control: moderate throttle, low jump rate (air touch stability), save boost for carry
+        a[1] = float(np.clip(a[1], 0.5, 1.0))
+        a[6] = float(np.clip(a[6], 0.0, 0.8))
+        a[7] = 0.0
+        return a
+
+    if intent == "BACKBOARD_DEFEND":
+        # decisive retreat-to-backboard: full throttle, controlled boost, no handbrake
+        a[1] = 1.0
+        a[6] = max(a[6], 0.6)
+        a[7] = 0.0
         return a
 
     return a

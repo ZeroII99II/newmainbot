@@ -18,6 +18,9 @@ DEFAULT_SSL_W = {
     "ceiling_shot": 0.30,
     "musty": 0.25,
     "double_tap": 0.35,
+    "air_dribble_ctrl": 0.45,
+    "backboard_save": 0.60,
+    "corner_clear": 0.35,
     # Ultra-efficient reads / movement
     "zap_chain": 0.20,
     "stall": 0.15,
@@ -78,6 +81,11 @@ class SSLReward:
         r += g["ceiling_shot"] * info.get("ceiling_setup", 0.0)
         r += g["musty"] * info.get("musty_attempt", 0.0)
         r += g["double_tap"] * info.get("double_tap_attempt", 0.0)
+
+        # Aerial play mastery
+        r += g["air_dribble_ctrl"] * info.get("air_dribble_ctrl", 0.0)
+        r += g["backboard_save"]   * info.get("backboard_save", 0.0)
+        r += g["corner_clear"]     * info.get("corner_clear_quality", 0.0)
 
         # Ultra-efficient reads
         r += g["zap_chain"] * info.get("zap_chain_dash", 0.0)

@@ -1,6 +1,7 @@
 import math, numpy as np
 from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy, football_lane
+from aerial_play import backboard_intercept
 
 SUP = 2300.0  # supersonic speed cap (uu/s) for quick ETAs
 
@@ -183,4 +184,21 @@ def compute_context(packet, index):
         intent=intent,
         nearest_big_boost=nearest_big_boost(my_p, team),
     ))
+    # Aerial offense window: ball rising near sidewall & we can get there first
+    sidewall_near = (abs(b_p[0]) > 1800.0 and b_p[2] > 200.0)
+    aerial_window = sidewall_near and (eta_me_ball + 0.08 < eta_opp_ball)
+
+    # Aerial threat against us: predicted backboard intercept exists soon
+    bbP, bbT = backboard_intercept(ball, team, max_t=1.6)
+    aerial_threat = (bbP is not None and (bbT or 10.0) < 1.2)
+
+    # Intent nudges
+    if aerial_threat and threat_raw > 0.3:
+        intent = "BACKBOARD_DEFEND"
+    elif aerial_window and pressure_raw > 0.5:
+        intent = "AIR_DRIBBLE"
+
+    ctx.update(dict(aerial_threat=aerial_threat, aerial_window=aerial_window))
+    ctx["intent"] = intent
+
     return ctx
