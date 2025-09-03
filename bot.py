@@ -1,24 +1,31 @@
-# bot.py — "Destroyer" (1v1), SSL/pro curriculum, hot-reload, aerial drills
+# bot.py — Destroyer: resumes from Necto (working copy), hot-reload, kickoff-after-pause, fallback motion
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
-import numpy as np, math, os, time
+import numpy as np, math, os, time, shutil
+from pathlib import Path
 from enum import Enum
 
-# ==== Runtime knobs ====
-BOT_NAME = "Destroyer"        # printed label only
-FAST_MODE = True              # hide overlay to maximize FPS
+# ===== Runtime knobs =====
+BOT_NAME = "Destroyer"
+FAST_MODE = True
+
+# Start conservative; re-enable after motion confirmed
 ENABLE_AERIAL_CURRICULUM = True
-ENABLE_AERIAL_DRILLS = False  # offline only; inject aerial/double/flip scenes
+ENABLE_AERIAL_DRILLS = False     # OFF first; turn ON later
 DRILL_INTERVAL_S = 7.0
 
-ENABLE_ONLINE_TRAINER = False
-TRAINER_STEP_EVERY = 1.0      # seconds
+ENABLE_ONLINE_TRAINER = False    # OFF first; turn ON after motion confirmed
+TRAINER_STEP_EVERY = 1.0
 TRAINER_BATCH = 512
 TRAINER_LR = 3e-4
 
-ALLOWED_INDICES = {0, 1}      # force clean 1v1
+ALLOWED_INDICES = {0, 1}         # clean 1v1 only
 
-# Torch (safe import checked inside live_policy/trainer)
+# ==== Model resume settings ====
+MODEL_PREFERENCE = ["destroyer.pt", "necto-model.pt", "necto.pt", "NectoModel.pt", "model.pt"]
+WORKING_MODEL = "destroyer.pt"    # fine-tune target; created from first found base
+
+# ==== Imports from our local modules ====
 from live_policy import LivePolicy
 from ring_buffer import RingBuffer
 from rewards_ssl import SSLReward, DEFAULT_SSL_W
@@ -26,13 +33,13 @@ from kickoff_detector import is_kickoff_pause, detect_spawn_side, Spawn
 from speedflip import run_speedflip, SpeedFlipParams
 from trainer_online_bc import OnlineBC
 
-# 107-dim obs adapter (keep your function signature)
+# 107-dim obs adapter
 try:
     from necto_obs import build_obs  # def build_obs(packet, index) -> np.ndarray(107,)
 except Exception:
     build_obs = None
 
-# ==== helpers for reward features ====
+# ===== helpers for reward features =====
 def _dot2(ax, ay, bx, by):
     n1 = math.hypot(ax, ay); n2 = math.hypot(bx, by)
     if n1 < 1e-6 or n2 < 1e-6: return 0.0
@@ -62,10 +69,10 @@ def _car_forward(rot):
     cy, sy = math.cos(rot.yaw), math.sin(rot.yaw)
     return (cp*cy, cp*sy, sp)
 
-def _possession_good_boost(boost, progress_cos):  # reward using boost to progress
+def _possession_good_boost(boost, progress_cos):
     return 1.0 if (boost > 20 and progress_cos > 0.1) else 0.0
 
-def _waste_boost(boost, progress_cos):            # penalize wasting while regressing
+def _waste_boost(boost, progress_cos):
     return 1.0 if (boost < 5 and progress_cos < -0.1) else 0.0
 
 def _shadow_cos(my_loc, ball_loc, my_fwd, team):
@@ -78,10 +85,9 @@ def _hit_backboard(ball_loc, team):
     return (ball_loc.y * _sign_to_opp(team)) > 4900 and ball_loc.z > 1200
 
 def _flip_reset_heuristic(car, ball, was_airborne, prev_double_jump):
-    airborne = _car_airborne(car)
-    z = ball.physics.location.z
+    airborne = _car_airborne(car); z = ball.physics.location.z
     if airborne and z > 800 and not prev_double_jump:
-        return 0.5  # attempt credit
+        return 0.5
     return 0.0
 
 def _double_tap_heuristic(now, last_backboard_ping, latest_touch_me):
@@ -108,15 +114,35 @@ class Destroyer(BaseAgent):
             print(f"[guard] refusing unexpected bot index={self.index}")
             raise SystemExit(0)
 
-        self.policy = LivePolicy(path="necto-model.pt", device="cpu")
+        # --- Warm start from existing model(s) ---
+        def _pick_existing_model():
+            for name in MODEL_PREFERENCE:
+                if Path(name).exists():
+                    return name
+            return None
+
+        base_model = _pick_existing_model()
+        if base_model is None:
+            print("[Destroyer] WARNING: No base model found next to bot.py. Expected one of:", MODEL_PREFERENCE)
+        else:
+            if not Path(WORKING_MODEL).exists():
+                try:
+                    shutil.copy(base_model, WORKING_MODEL)
+                    print(f"[Destroyer] Warm-started working model '{WORKING_MODEL}' from '{base_model}'")
+                except Exception as e:
+                    print(f"[Destroyer] Copy failed ({e}); will try to load base directly")
+
+        # Policy loads working model, with fallbacks to base names
+        self.policy = LivePolicy(path=WORKING_MODEL, device="cpu", fallback_paths=MODEL_PREFERENCE)
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
 
-        # kickoff tracking
+        # kickoff tracking + correct timing (after pause)
         self.kick_prepping = False
         self.kick_active = False
         self.kick_t0 = 0.0
         self.spawn_side = Spawn.MID
+        self.kick_params = SpeedFlipParams()
 
         # score trackers for 'done'
         self._last_blue_goals = 0
@@ -128,17 +154,18 @@ class Destroyer(BaseAgent):
         self._last_double_jump = False
         self._last_drill_time = 0.0
 
-        # optional online BC trainer
+        # optional online BC trainer (OFF by default; turn on after motion confirmed)
         self._trainer = None
         if ENABLE_ONLINE_TRAINER:
             try:
                 self._trainer = OnlineBC(self.buffer, self.policy,
-                                         out_path="necto-model.pt",
+                                         out_path=WORKING_MODEL,
                                          step_every=TRAINER_STEP_EVERY,
                                          batch=TRAINER_BATCH,
                                          lr=TRAINER_LR)
                 self._trainer.start()
-            except Exception:
+            except Exception as e:
+                print(f"[Destroyer] Trainer did not start: {e}")
                 self._trainer = None
 
         print(f"{BOT_NAME} Ready - Index: {self.index}")
@@ -171,7 +198,7 @@ class Destroyer(BaseAgent):
         info["boost_waste"] = _waste_boost(boost, progress_cos)
 
         info["shadow_angle_cos"] = _shadow_cos(my.physics.location, ball.physics.location, my_fwd, team)
-        info["last_man_break_flag"] = 0.0  # optional later
+        info["last_man_break_flag"] = 0.0
 
         lt_idx, _ = _latest_touch(packet)
         now = packet.game_info.seconds_elapsed
@@ -198,52 +225,7 @@ class Destroyer(BaseAgent):
         self._last_double_jump = _double_jumped(my)
         return info
 
-    # drills
-    def _rand(self, a, b): return a + np.random.rand() * (b - a)
-
-    def _set_aerial_drill(self, mode="general"):
-        try:
-            car_z = self._rand(50, 200)
-            car_x = self._rand(-1500, 1500)
-            car_y = self._rand(-3000, -1000) if self.team == 0 else self._rand(1000, 3000)
-            car_y *= -1 if self.team == 1 else 1
-
-            ball_x = self._rand(-1200, 1200)
-            ball_y = self._rand(1200, 2200) * (_sign_to_opp(self.team))
-            ball_z = self._rand(900, 1800)
-
-            if mode == "double":
-                bvx = self._rand(-400, 400)
-                bvy = self._rand(1400, 1900) * (_sign_to_opp(self.team))
-                bvz = self._rand(400, 800)
-            elif mode == "flip":
-                bvx = self._rand(-150, 150); bvy = self._rand(-150, 150); bvz = self._rand(-150, -50)
-            else:
-                bvx = self._rand(-300, 300); bvy = self._rand(800, 1400) * (_sign_to_opp(self.team)); bvz = self._rand(200, 600)
-
-            car_boost = 100
-            p = Physics(location=Vector3(car_x, car_y, car_z), rotation=Rotator(0.0, 0.0, 0.0), velocity=Vector3(0, 0, 0))
-            car_state = CarState(physics=p, boost_amount=car_boost)
-            ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, ball_z),
-                                                   velocity=Vector3(bvx, bvy, bvz)))
-            gs = GameState(ball=ball_state, cars={self.index: car_state})
-            self.set_game_state(gs)
-        except Exception:
-            pass
-
-    def _maybe_inject_drill(self, packet):
-        if not (ENABLE_AERIAL_DRILLS and ENABLE_AERIAL_CURRICULUM):
-            return
-        now = packet.game_info.seconds_elapsed
-        if is_kickoff_pause(packet):
-            return
-        ball = packet.game_ball
-        speed = np.linalg.norm([ball.physics.velocity.x, ball.physics.velocity.y, ball.physics.velocity.z])
-        if speed < 200 and ball.physics.location.z < 120 and (now - self._last_drill_time) > DRILL_INTERVAL_S:
-            import numpy as _np
-            mode = _np.random.choice(["general", "double", "flip"], p=[0.5, 0.25, 0.25])
-            self._set_aerial_drill(mode)
-            self._last_drill_time = now
+    # (Aerial drills exist in earlier versions; left off until motion confirmed)
 
     def get_output(self, packet) -> SimpleControllerState:
         if packet is None or packet.game_info is None:
@@ -252,19 +234,19 @@ class Destroyer(BaseAgent):
         if build_obs is None:
             return SimpleControllerState()
         obs = build_obs(packet, self.index)
-        if not isinstance(obs, np.ndarray) or obs.shape != (107,):
-            print(f"[Destroyer] bad obs shape: {None if obs is None else obs.shape}")
+        if not isinstance(obs, np.ndarray) or obs.shape[0] != 107:
+            print(f"[Destroyer] bad obs shape: {None if not isinstance(obs, np.ndarray) else obs.shape}")
             return SimpleControllerState()
 
+        # --- Policy action
         action = self.policy.act(obs)
 
-        # If model missing -> naive chase fallback so we still move
+        # --- Fallback motion if model not loaded (all zeros)
         if (action == 0).all():
-            ball = packet.game_ball
-            me = packet.game_cars[self.index]
+            ball = packet.game_ball; me = packet.game_cars[self.index]
             dx = ball.physics.location.x - me.physics.location.x
             dy = ball.physics.location.y - me.physics.location.y
-            steer = np.clip(np.arctan2(dy, dx) / np.pi, -1, 1)  # crude heading -> [-1,1]
+            steer = np.clip(np.arctan2(dy, dx) / np.pi, -1, 1)
             throttle = 1.0
             hb = 1.0 if abs(steer) > 0.5 else 0.0
             jump = 1.0 if ball.physics.location.z > 400 else 0.0
@@ -272,34 +254,26 @@ class Destroyer(BaseAgent):
 
         ctl = to_controller(action)
 
-        # --- kickoff timing: prep during pause, execute after unpause ---
+        # --- Kickoff timing: prep during pause; execute after unpause
         gi = packet.game_info
-
-        # create flags once in initialize_agent() if you don't have them yet:
-        # self.kick_prepping = False
-        # self.kick_active = False
-        # self.kick_t0 = 0.0
-
         if is_kickoff_pause(packet):
-            # precompute spawn & arm the kickoff, but DON'T execute while paused
-            if not getattr(self, "kick_prepping", False):
+            if not self.kick_prepping:
                 self.kick_prepping = True
                 self.kick_active = False
                 self.spawn_side = detect_spawn_side(packet.game_cars[self.index])
         else:
-            # we just left pause: start kickoff routine now
-            if getattr(self, "kick_prepping", False):
+            if self.kick_prepping:
                 self.kick_prepping = False
                 self.kick_active = True
-                self.kick_t0 = gi.seconds_elapsed  # start clock at unpause
+                self.kick_t0 = gi.seconds_elapsed
 
-        # run the routine for ~1.2s after unpause
-        if getattr(self, "kick_active", False):
+        if self.kick_active:
             t_since = gi.seconds_elapsed - self.kick_t0
             ctl = run_speedflip(packet, packet.game_cars[self.index], self.spawn_side, ctl, t_since, SpeedFlipParams())
             if t_since > 1.2:
                 self.kick_active = False
 
+        # --- Reward + buffer
         info = self._info_from_packet(packet)
         if packet.game_info.is_kickoff_pause:
             info["kickoff_score"] = 0.2
@@ -311,8 +285,7 @@ class Destroyer(BaseAgent):
         self._last_blue_goals = packet.teams[0].score
         self._last_orange_goals = packet.teams[1].score
 
-        self._maybe_inject_drill(packet)
-
+        # Overlay (disabled in FAST_MODE)
         if not FAST_MODE:
             try:
                 r = self.renderer
