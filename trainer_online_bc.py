@@ -52,7 +52,7 @@ class OnlineBC:
             except Exception:
                 continue
 
-            # Save to the exact file the policy is currently using
+            # Save to the exact file the policy is currently using (working copy)
             save_target = getattr(self.policy, "path", self.out_path)
             if time.time() - last_save > self.step_every:
                 try:
