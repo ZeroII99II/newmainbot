@@ -38,6 +38,14 @@ DEFAULT_SSL_W = {
     "possession_awareness": 0.20,
     "recovery_ok": 0.20,
     "overcommit_flag_pen": 0.35,
+    # Recovery mastery weights
+    "recovery_mastery": 0.45,
+    "air_roll_landing_w": 0.25,
+    "wave_dash_w": 0.25,
+    "half_flip_w": 0.25,
+    "ceiling_reset_w": 0.15,
+    "net_ramp_reset_w": 0.10,
+    "wall_nose_down_w": 0.15,
 }
 
 
@@ -88,6 +96,15 @@ class SSLReward:
         r += g["possession_awareness"] * info.get("possession_idx", 0.0)
         r += g["recovery_ok"]          * (1.0 if info.get("recovery_ok", False) else 0.0)
         r -= g["overcommit_flag_pen"]  * info.get("overcommit_flag", 0.0)
+
+        # Recovery mastery
+        r += g["recovery_mastery"]   * info.get("recovery_mastery", 0.0)
+        r += g["air_roll_landing_w"] * info.get("air_roll_landing", 0.0)
+        r += g["wave_dash_w"]        * info.get("wave_dash_exec", 0.0)
+        r += g["half_flip_w"]        * info.get("half_flip_exec", 0.0)
+        r += g["ceiling_reset_w"]    * info.get("ceiling_reset_exec", 0.0)
+        r += g["net_ramp_reset_w"]   * info.get("net_ramp_reset_exec", 0.0)
+        r += g["wall_nose_down_w"]   * info.get("wall_nose_down", 0.0)
 
         return float(max(-1.0, min(1.0, r)))
 

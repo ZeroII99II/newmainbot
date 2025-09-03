@@ -6,6 +6,14 @@ def _hyp2(x, y):
     return float(math.hypot(x, y))
 
 
+def _ang_norm(a):
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a < -math.pi:
+        a += 2 * math.pi
+    return a
+
+
 def _vec2(x, y):
     return np.array([float(x), float(y)], dtype=np.float32)
 
@@ -228,6 +236,60 @@ class SkillTelemetry:
         else:
             self._recent_fake = max(0, self._recent_fake - 1)
         info["deception_fake"] = 1.0 if self._recent_fake > 0 else 0.0
+
+        # --- Recovery mastery detectors ---
+
+        # Air-roll landing: recently airborne, then ground contact with nose-down pitch
+        was_air = getattr(self, "_was_airborne", False)
+        just_landed = (was_air and not airborne and my_loc.z < 70)
+        air_roll_ok = just_landed and pitch > 0.15  # nose-down on landing
+        info["air_roll_landing"] = 1.0 if air_roll_ok else 0.0
+        self._was_airborne = airborne
+
+        # Wave dash: ground contact after short hop + horizontal speed spike
+        spd_xy = float(np.linalg.norm([my_vel.x, my_vel.y]))
+        prev_spd_xy = getattr(self, "_prev_spd_xy", 0.0)
+        self._prev_spd_xy = spd_xy
+        wave_dash = (just_landed and (spd_xy - prev_spd_xy) > 300.0 and abs(my_vel.z) < 30)
+        info["wave_dash_exec"] = 1.0 if wave_dash else 0.0
+
+        # Half-flip proxy: quick 180 reversal + speed pickup within ~0.7s
+        yaw = float(my_rot.yaw)
+        prev_yaw = getattr(self, "_prev_yaw", yaw)
+        d_yaw = abs(_ang_norm(yaw - prev_yaw))
+        self._prev_yaw = yaw
+        hf = (d_yaw > 2.5 and spd_xy > prev_spd_xy + 200.0)
+        info["half_flip_exec"] = 1.0 if hf else 0.0
+
+        # Ceiling reset usage: ceiling contact then stable aerial a moment later
+        ceiling_touch = getattr(self, "_ceil_touch", False)
+        now = packet.game_info.seconds_elapsed
+        # consider contact if we were at z>1900 with wheel contact recently
+        if self._is_on_ceiling(my_loc, getattr(me, "has_wheel_contact", False)):
+            self._ceil_touch = True
+            self._ceil_t = now
+        elif getattr(self, "_ceil_touch", False) and now - getattr(self, "_ceil_t", 0.0) < 1.2 and airborne:
+            info["ceiling_reset_exec"] = 1.0
+            self._ceil_touch = False
+        else:
+            info["ceiling_reset_exec"] = 0.0
+
+        # Goal ramp (inside net curve) pop/reset proxy: contact near y=±5120, x within 900, z increasing
+        near_ramp = (abs(my_loc.y) > 4900 and abs(my_loc.x) < 900)
+        ramp_pop = near_ramp and my_vel.z > 150
+        info["net_ramp_reset_exec"] = 1.0 if ramp_pop else 0.0
+
+        # Wall nose-down landing: on wall -> just grounded with positive pitch
+        info["wall_nose_down"] = 1.0 if (self._last_my_on_wall and not on_wall and just_landed and pitch > 0.1) else 0.0
+        self._last_my_on_wall = on_wall
+
+        # Aggregate recovery score
+        info["recovery_mastery"] = float(
+            0.35 * info.get("air_roll_landing", 0.0) +
+            0.30 * info.get("wave_dash_exec", 0.0) +
+            0.25 * info.get("half_flip_exec", 0.0) +
+            0.10 * info.get("wall_nose_down", 0.0)
+        )
 
         # store for next tick
         self._ball_speed_prev = ball_spd

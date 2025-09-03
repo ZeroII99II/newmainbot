@@ -1,5 +1,6 @@
 # simple_policy.py — baseline 1v1 controller: intercept, carry, flick
 import numpy as np, math
+import time
 from rlbot.agents.base_agent import SimpleControllerState
 
 
@@ -35,6 +36,9 @@ class HeuristicBrain:
         self.flip_dist = 2200.0
         self._carry_ticks = 0
         self._last_jump_time = 0.0
+        self._last_air = False
+        self._land_t0 = 0.0
+        self._dash_active = False
 
     def _aim_point(self, ball_loc, team, approach_dist=140.0):
         goal_y = 5120.0 if team == 1 else -5120.0
@@ -47,6 +51,26 @@ class HeuristicBrain:
     def action(self, packet, index, intent: str = None) -> np.ndarray:
         me = packet.game_cars[index]
         ball = packet.game_ball
+        jump = 0.0
+        pitch = 0.0
+        air = (not getattr(me, "has_wheel_contact", True)) and me.physics.location.z > 70
+        if air:
+            self._last_air = True
+        else:
+            if self._last_air:
+                self._land_t0 = time.time()
+                self._dash_active = True
+            self._last_air = False
+
+        if self._dash_active:
+            dt = time.time() - self._land_t0
+            if 0.04 < dt < 0.12:
+                jump = 1.0
+            elif 0.12 <= dt < 0.24:
+                pitch = 1.0
+            else:
+                self._dash_active = False
+
         team = me.team
         my_pos = _vec(me.physics.location.x, me.physics.location.y)
         my_yaw = _yaw(me.physics.rotation)
@@ -85,7 +109,6 @@ class HeuristicBrain:
         boost = 1.0 if (abs(ang_err) < self.align_boost_thresh and my_speed < 2200.0) else 0.0
 
         # jump/flick: if carrying and roughly aligned, execute pop
-        jump = 0.0
         if carrying and abs(ang_err) < 0.35:
             jump = 1.0
 
@@ -102,7 +125,7 @@ class HeuristicBrain:
             [
                 float(steer),
                 float(throttle),
-                0.0,
+                float(pitch),
                 0.0,
                 0.0,
                 float(jump),
