@@ -1,2 +1,4 @@
 rlbot>=1.33,<2
 numpy>=1.21
+
+torch ; python_version >= "3.10"
