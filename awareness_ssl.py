@@ -1,4 +1,4 @@
-import math, numpy as np
+import numpy as np, math
 from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy, football_lane
 from aerial_play import backboard_intercept
@@ -197,7 +197,38 @@ def compute_context(packet, index):
         intent = "BACKBOARD_DEFEND"
     elif aerial_window and pressure_raw > 0.5:
         intent = "AIR_DRIBBLE"
+    # ----- Exploit window detection -----
+    # Open net proxy: opponent behind ball (relative to their goal line) and far from center lane, or demoed/airborne with low boost.
+    opp_bad = False
+    if opp is not None:
+        opp_loc = _v3(opp.physics.location)
+        opp_air = (not getattr(opp, "has_wheel_contact", True)) and opp_loc[2] > 70
+        opp_low_boost = float(getattr(opp, "boost", 33.0)) < 10.0
+        # Opp behind play: compare y along goal direction
+        to_opp_sign = _sign_to_opp(team)
+        opp_behind = (opp_loc[1] * to_opp_sign) < (b_p[1] * to_opp_sign) - 600.0
+        out_of_lane = abs(opp_loc[0]) > 1800.0
+        opp_bad = (opp_air or opp_low_boost or (opp_behind and out_of_lane))
 
+    # Ball scorable corridor: ball in opponent half, inside posts width, height manageable
+    in_finishing_lane = ( (b_p[1] * _sign_to_opp(team)) > 700.0 and abs(b_p[0]) < 1800.0 and b_p[2] < 1200.0 )
+
+    # Whiff/bad clear proxy: ball slow or bouncing upward near their box with opponent ETA worse than ours
+    box_bounce = in_finishing_lane and (b_v[2] > 0 or np.linalg.norm(b_v) < 1200.0)
+    eta_edge = eta_me_ball + 0.10 < eta_opp_ball
+
+    exploit_window = bool((in_finishing_lane and (opp_bad or box_bounce) and eta_edge) or
+                          (in_opp_half and eta_me_ball + 0.05 < eta_opp_ball and np.linalg.norm(b_v) < 1800.0))
+
+    # If we see a juicy window and we're not in immediate danger, flip to EXPLOIT
+    if exploit_window and threat_raw < 0.45:
+        intent = "EXPLOIT"
+
+    ctx.update(dict(
+        exploit_window=exploit_window,
+        in_finishing_lane=in_finishing_lane,
+        opp_bad_state=opp_bad,
+    ))
     ctx.update(dict(aerial_threat=aerial_threat, aerial_window=aerial_window))
     ctx["intent"] = intent
 
