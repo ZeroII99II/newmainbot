@@ -351,5 +351,48 @@ def inject_box_panic(agent):
                                            velocity=Vector3(0, bvy, 0)))
     if getattr(agent, "_state_setting_ok", False):
         agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+def inject_kickoff_basic(agent):
+    # place car & ball for straight/diagonal simple kickoff
+    team = agent.team
+    # Straight spawn
+    car_x, car_y = 0, -2048 if team==0 else 2048
+    ball_state = BallState(physics=Physics(location=Vector3(0,0,92)))
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 17),
+                                         rotation=Rotator(0, 0, 0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=33)
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_shadow_lane(agent):
+    # teach staying goal-side & shadowing on same lane
+    team = agent.team
+    y_ball = -2500 if team==0 else 2500
+    y_car  = y_ball - (800 if team==0 else -800)
+    ball_state = BallState(physics=Physics(location=Vector3(0, y_ball, 100), velocity=Vector3(0,0,0)))
+    car_state  = CarState(physics=Physics(location=Vector3(0, y_car, 50), rotation=Rotator(0,0,0)))
+    if getattr(agent,"_state_setting_ok",False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_corner_push_shot(agent):
+    # ball rolling out of corner -> push to far post
+    team = agent.team
+    side = -1 if np.random.rand()<0.5 else 1
+    bx, by = 2500*side, -3500 if team==0 else 3500
+    ball_state = BallState(physics=Physics(location=Vector3(bx, by, 100), velocity=Vector3(-400*side, 350*(1 if team==0 else -1), 0)))
+    car_state  = CarState(physics=Physics(location=Vector3(bx-700*side, by-600*(1 if team==0 else -1), 50),
+                                         rotation=Rotator(0,0,0), velocity=Vector3(0,0,0)), boost_amount=30)
+    if getattr(agent,"_state_setting_ok",False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_pad_lane(agent):
+    # place car low boost and a lane of pads ahead
+    team = agent.team
+    car_state = CarState(physics=Physics(location=Vector3(-1000, -2000 if team==0 else 2000, 50)))
+    if getattr(agent,"_state_setting_ok",False):
+        agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 

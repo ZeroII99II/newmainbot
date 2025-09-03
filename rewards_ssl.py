@@ -5,6 +5,7 @@ import numpy as np
 DEFAULT_SSL_W = {
     # Core mastery
     "speedflip": 0.25,
+    "kickoff_first_touch": 0.60,
     "adv_recovery": 0.25,
     "fast_aerial": 0.30,
     "wall_play": 0.20,
@@ -26,9 +27,9 @@ DEFAULT_SSL_W = {
     "stall": 0.15,
     "wavedash_flick": 0.20,
     "deception": 0.20,
-    "perfect_touch": 0.40,
+    "perfect_touch": 0.60,
     # General play
-    "ball_progress": 0.40,
+    "ball_progress": 0.45,
     "touch_quality": 0.30,
     "boost_pos": 0.18,
     "boost_neg": 0.10,
@@ -49,19 +50,21 @@ DEFAULT_SSL_W = {
     "ceiling_reset_w": 0.15,
     "net_ramp_reset_w": 0.10,
     "wall_nose_down_w": 0.15,
-    "small_pads": 0.20,
+    "small_pads": 0.35,
     "boost_delta": 0.15,
     "possession_time": 0.25,
     "low50": 0.30,
-    "back_post_cover": 0.25,
+    "back_post_cover": 0.40,
     "demo_util": 0.25,
     "exploit_window": 0.25,
     "conversion_attempt": 0.35,
     "conversion_success": 1.50,
     "finish_variety": 0.10,
-    "own_slot_time_pen": 0.25,
-    "bad_center_touch_pen": 0.80,
+    "own_slot_time_pen": 0.35,
+    "bad_center_touch_pen": 0.90,
     "corner_clear_success": 0.75,
+    "wasted_boost_pen": 0.25,
+    "reverse_long_pen": 0.20,
 }
 
 
@@ -85,7 +88,7 @@ class SSLReward:
         g = _apply_stage_boosts(self.w, info)
         r = 0.0
         # Core mastery
-        r += g["speedflip"] * info.get("kickoff_first_touch", 0.0)
+        r += g["kickoff_first_touch"] * info.get("kickoff_first_touch", 0.0)
         r += g["adv_recovery"] * info.get("adv_recovery", 0.0)
         r += g["fast_aerial"] * info.get("fast_aerial_attempt", 0.0)
         r += g["wall_play"] * info.get("wall_play", 0.0)
@@ -117,12 +120,13 @@ class SSLReward:
         r += g["ball_progress"] * info.get("ball_to_opp_goal_cos", 0.0)
         r += g["touch_quality"] * info.get("ball_speed_gain_norm", 0.0)
         r += g["boost_pos"] * info.get("boost_use_good", 0.0)
-        r -= g["boost_neg"] * info.get("boost_waste", 0.0)
+        r -= g["wasted_boost_pen"] * info.get("boost_waste", 0.0)
         r -= g["overcommit"] * info.get("last_man_break_flag", 0.0)
         r += g["kickoff"] * info.get("kickoff_score", 0.0)
         r += g["goal"] * info.get("scored", 0.0)
         r -= g["concede"] * info.get("conceded", 0.0)
         r -= g["idle"] * info.get("idle_ticks", 0.0)
+        r -= g["reverse_long_pen"] * info.get("reverse_long", 0.0)
 
         # Awareness taps
         r += g["pressure_awareness"]   * info.get("pressure_idx", 0.0)

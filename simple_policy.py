@@ -110,6 +110,13 @@ class HeuristicBrain:
         handbrake = 1.0 if (abs(ang_err) > self.handbrake_thresh and dist < 1500.0) else 0.0
         boost = 1.0 if (abs(ang_err) < self.align_boost_thresh and my_speed < 2200.0) else 0.0
 
+        # Bronze Bootcamp helpers
+        if getattr(self.agent, "_bronze_mode", False):
+            boost = 1.0 if abs(ang_err) < 0.25 else 0.0
+            if bool(getattr(packet.game_info, "is_kickoff_pause", False)) and abs(ang_err) < 0.2 and dist < 450:
+                jump = 1.0
+                pitch = 1.0  # front-flip
+
         # long flip when far & slow & aligned
         if (
             dist > self.flip_dist
