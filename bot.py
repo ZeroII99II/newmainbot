@@ -1,8 +1,10 @@
 # bot.py — Destroyer: resumes from Necto (working copy), hot-reload, kickoff-after-pause, fallback motion
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
-import numpy as np, math, time
-import numpy as _np
+import numpy as np
+# unify any other alias we might have used earlier
+_np = np
+import math, time
 from enum import Enum
 from autosave import ModelAutoSaver
 from mechanics_ssl import SkillTelemetry
@@ -436,9 +438,32 @@ class Destroyer(BaseAgent):
         if build_obs is None:
             return SimpleControllerState()
         obs = build_obs(packet, self.index)
-        if not isinstance(obs, np.ndarray) or obs.shape[0] != 107:
-            print(f"[Destroyer] bad obs shape: {None if not isinstance(obs, np.ndarray) else obs.shape}")
-            return SimpleControllerState()
+        # --- Observation sanity: ensure 1D float32 np.array of length 107 (Necto obs) ---
+        try:
+            if not isinstance(obs, np.ndarray):
+                obs = np.asarray(obs, dtype=np.float32)
+            else:
+                obs = obs.astype(np.float32, copy=False)
+
+            # Flatten and coerce to 1D
+            if obs.ndim > 1:
+                obs = obs.ravel()
+
+            # Pad or trim to 107 to avoid crashes; emit a single warning once
+            if obs.size != 107:
+                if not hasattr(self, "_warned_obs_shape"):
+                    print(f"[Destroyer] WARNING: obs size={obs.size}, coercing to 107.")
+                    self._warned_obs_shape = True
+                if obs.size < 107:
+                    obs = np.pad(obs, (0, 107 - obs.size), mode="constant")
+                else:
+                    obs = obs[:107]
+        except Exception as e:
+            # Last-resort fallback: zero obs so the bot still returns controls
+            if not hasattr(self, "_warned_obs_fail"):
+                print(f"[Destroyer] ERROR: obs build failed ({e}). Using zeros(107).")
+                self._warned_obs_fail = True
+            obs = np.zeros(107, dtype=np.float32)
         # --- Awareness / context -> intent
         ctx = {}
         try:
@@ -480,7 +505,6 @@ class Destroyer(BaseAgent):
             try:
                 pad = ctx.get("pad_target_xy", None)
                 if pad is not None:
-                    import math, numpy as np
                     me = packet.game_cars[self.index]
                     dx = float(pad[0] - me.physics.location.x)
                     dy = float(pad[1] - me.physics.location.y)
