@@ -5,6 +5,8 @@ try:
 except Exception:
     TORCH_OK = False
 
+SAVE_INTERVAL_S = 60.0  # write trained weights to disk at most once per minute
+
 class OnlineBC:
     def __init__(self, buffer, policy, out_path="destroyer.pt", step_every=3.0, batch=256, lr=2e-4):
         self.buffer = buffer
@@ -54,7 +56,7 @@ class OnlineBC:
 
             # Save to the exact file the policy is currently using (working copy)
             save_target = getattr(self.policy, "path", self.out_path)
-            if time.time() - last_save > self.step_every:
+            if time.time() - last_save > SAVE_INTERVAL_S:
                 try:
                     torch.jit.save(model, save_target)
                     last_save = time.time()
