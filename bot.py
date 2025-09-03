@@ -82,8 +82,9 @@ from boost_pathing import nearest_small_pad_xy
 from aerial_play import AirDribbleBrain, BackboardDefenseBrain
 from finisher import FinisherBrain
 from danger_clear import DangerClearBrain
-from curriculum import STAGES, LOWER_IS_BETTER, combine_reward_boosts
-from progress_store import ProgressStore
+# === Curriculum imports: namespaced to avoid local-variable shadowing ===
+import curriculum as academy_spec
+from progress_store import ProgressStore  # if not already imported
 from overlay_pro import draw_overlay
 
 # 107-dim obs adapter
@@ -280,6 +281,11 @@ class Destroyer(BaseAgent):
         # ----- Destroyer Academy: staged curriculum -----
         self.academy = ProgressStore()
         self.academy.load()
+        try:
+            names = [s.name for s in academy_spec.STAGES]
+            print(f"[Destroyer Academy] Stages loaded: {names}")
+        except Exception as e:
+            print(f"[Destroyer Academy] WARNING: could not read STAGES: {e}")
         self._progress = 0.0
         self._progress_last_pass_t = 0.0
         self._last_overlay_time = 0.0
@@ -292,8 +298,7 @@ class Destroyer(BaseAgent):
         self._show_hud = cfg.getboolean("Academy", "show_hud", fallback=False)
         if start_stage.lower() != "auto":
             try:
-                from curriculum import STAGES
-                names = [s.name for s in STAGES]
+                names = [s.name for s in academy_spec.STAGES]
                 if start_stage in names:
                     self.academy.stage_idx = names.index(start_stage)
                     print(f"[Academy] Forced start stage: {start_stage}")
@@ -305,9 +310,12 @@ class Destroyer(BaseAgent):
 
         # cache a baseline of reward weights if you have them exposed; ok if empty
         self._base_reward_weights = dict(getattr(self, "reward_weights", {})) if hasattr(self, "reward_weights") else {}
-        self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
+        self._stage_reward_weights = academy_spec.combine_reward_boosts(
+            self._base_reward_weights,
+            academy_spec.STAGES[self.academy.stage_idx]
+        )
 
-        print(f"[Destroyer Academy] Starting at stage: {STAGES[self.academy.stage_idx].name}")
+        print(f"[Destroyer Academy] Starting at stage: {academy_spec.STAGES[self.academy.stage_idx].name}")
 
         if getattr(self, "_bronze_mode", False):
             self.drill_probs["core"]   = [("kickoff_basic", 0.30), ("shadow_lane", 0.30), ("pad_lane", 0.20), ("box_clear", 0.20)]
@@ -365,7 +373,7 @@ class Destroyer(BaseAgent):
         # base phase list
         plist = list(self.drill_probs.get(self.curriculum_phase, []))
         # add stage-specific drills
-        stage = STAGES[self.academy.stage_idx]
+        stage = academy_spec.STAGES[self.academy.stage_idx]
         plist.extend(stage.drills)
         if not plist: return None
         names, weights = zip(*plist)
@@ -733,14 +741,14 @@ class Destroyer(BaseAgent):
         except Exception:
             pass
         # ===== Stage progress calculation =====
-        spec = STAGES[self.academy.stage_idx]
+        spec = academy_spec.STAGES[self.academy.stage_idx]
 
         # Build metric progress parts in [0..1]
         prog_parts = []
         sample_out = {}
         for key, target, w in spec.goals:
             val = float(info.get(key, 0.0))
-            if key in LOWER_IS_BETTER:
+            if key in academy_spec.LOWER_IS_BETTER:
                 cap = max(target, 1e-3)
                 frac = max(0.0, 1.0 - (val / cap))  # lower is better
             else:
@@ -769,12 +777,15 @@ class Destroyer(BaseAgent):
                 self._progress_last_pass_t and
                 (elapsed - self._progress_last_pass_t) > spec.sustain_secs):
                 # advance stage
-                self.academy.stage_idx = min(self.academy.stage_idx + 1, len(STAGES)-1)
+                self.academy.stage_idx = min(self.academy.stage_idx + 1, len(academy_spec.STAGES)-1)
                 self.academy.stage_started_at = time.time()
                 self.academy.save()
                 # refresh stage boosts
-                self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
-                print(f"[Destroyer Academy] Advanced to stage: {STAGES[self.academy.stage_idx].name}")
+                self._stage_reward_weights = academy_spec.combine_reward_boosts(
+                    self._base_reward_weights,
+                    academy_spec.STAGES[self.academy.stage_idx]
+                )
+                print(f"[Destroyer Academy] Advanced to stage: {academy_spec.STAGES[self.academy.stage_idx].name}")
                 self._progress_last_pass_t = 0.0
         # else: locked — never auto-advance
 
@@ -806,7 +817,7 @@ class Destroyer(BaseAgent):
             show_hud = (not FAST_MODE) or getattr(self, "_show_hud", False)
             if show_hud and self.renderer is not None:
                 car = packet.game_cars[self.index]
-                stage_name = STAGES[self.academy.stage_idx].name if hasattr(self, "academy") else "—"
+                stage_name = academy_spec.STAGES[self.academy.stage_idx].name if hasattr(self, "academy") else "—"
                 if getattr(self, "_bronze_mode", False):
                     stage_name += " • Bootcamp"
                 progress = float(getattr(self, "_progress", 0.0))
