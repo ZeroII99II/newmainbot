@@ -315,3 +315,41 @@ def inject_bad_recovery(agent):
         agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state_me, 1-agent.index: car_state_opp}))
 
 
+def inject_box_clear(agent):
+    team = agent.team
+    own_goal_y = -5120.0 if team == 0 else 5120.0
+    # Ball centered in slot
+    ball_x = np.random.uniform(-600, 600)
+    ball_y = own_goal_y + (1200 if team == 0 else -1200)
+    ball_z = np.random.uniform(120, 240)
+    car_y  = ball_y + ( -900 if team == 0 else 900 )
+    car_x  = np.random.uniform(-900, 900)
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 60),
+                                         rotation=Rotator(0, 0, 0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=50)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, ball_z),
+                                           velocity=Vector3(0,0,0)))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_box_panic(agent):
+    team = agent.team
+    own_goal_y = -5120.0 if team == 0 else 5120.0
+    ball_x = np.random.uniform(-400, 400)
+    ball_y = own_goal_y + (900 if team == 0 else -900)
+    ball_z = np.random.uniform(100, 300)
+    bvy    = -800 if team == 1 else 800  # moving toward net
+    car_y  = ball_y + ( -600 if team == 0 else 600 )
+    car_x  = np.random.uniform(-600, 600)
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 60),
+                                         rotation=Rotator(0, 0, 0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=30)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, ball_z),
+                                           velocity=Vector3(0, bvy, 0)))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+

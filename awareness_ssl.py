@@ -230,6 +230,30 @@ def compute_context(packet, index):
         opp_bad_state=opp_bad,
     ))
     ctx.update(dict(aerial_threat=aerial_threat, aerial_window=aerial_window))
+
+    # ----- Danger Zone (front of own net) detection -----
+    own_goal_y = -5120.0 if team == 0 else 5120.0
+
+    # Front-of-net rectangle (the "slot"): centered X, between goal line and ~18 car lengths out
+    # Box bounds: |x| <= 1100, y within [goal_y + sign*300, goal_y + sign*2000]
+    if team == 0:
+        y_min, y_max = own_goal_y + 300.0, own_goal_y + 2000.0   # -4820 .. -3120
+    else:
+        y_min, y_max = own_goal_y - 2000.0, own_goal_y - 300.0   # 3120 .. 4820
+
+    in_x = abs(b_p[0]) <= 1100.0
+    in_y = (y_min <= b_p[1] <= y_max)
+    low_enough = b_p[2] < 1100.0
+
+    danger_zone = bool(in_x and in_y and low_enough)
+    ctx["danger_zone"] = danger_zone
+
+    # If ball is in our slot, bias into a purposeful corner clear unless an aerial backboard save is mandated
+    if danger_zone and threat_raw >= 0.2:
+        # If there's a backboard intercept imminent, BACKBOARD_DEFEND takes priority (already handled above if present)
+        if ctx.get("intent") not in ("BACKBOARD_DEFEND",):
+            intent = "CLEAR_CORNER"
+
     ctx["intent"] = intent
 
     return ctx

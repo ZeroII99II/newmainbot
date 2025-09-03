@@ -325,6 +325,25 @@ class SkillTelemetry:
         downward = ball_vel.z < -150
         info["corner_clear_quality"] = 1.0 if (backboard_save and sideward and downward) else 0.0
 
+        # ----- Own-slot safety metrics -----
+        own_goal_y = -5120.0 if team == 0 else 5120.0
+        if team == 0:
+            y_min, y_max = own_goal_y + 300.0, own_goal_y + 2000.0
+        else:
+            y_min, y_max = own_goal_y - 2000.0, own_goal_y - 300.0
+        in_slot = (abs(ball_loc.x) <= 1100.0 and y_min <= ball_loc.y <= y_max and ball_loc.z < 1100.0)
+        info["own_slot_time"] = 1.0 if in_slot else 0.0
+
+        # Our touch which keeps ball centered in slot = bad
+        bad_center_touch = (in_slot and latest_touch_me and abs(ball_loc.x) <= 800.0 and abs(ball_vel.x) < 300.0)
+        info["bad_center_touch"] = 1.0 if bad_center_touch else 0.0
+
+        # Corner clear success: ball exits slot with strong sideward component
+        left_slot = (not in_slot) and getattr(self, "_was_in_slot", False)
+        sideward = abs(ball_vel.x) > 800.0
+        info["corner_clear_success"] = 1.0 if (left_slot and sideward) else 0.0
+        self._was_in_slot = in_slot
+
         # store for next tick
         self._ball_speed_prev = ball_spd
         self._last_touch_me = latest_touch_me

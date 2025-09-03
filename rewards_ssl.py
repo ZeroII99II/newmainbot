@@ -59,6 +59,9 @@ DEFAULT_SSL_W = {
     "conversion_attempt": 0.35,
     "conversion_success": 1.50,
     "finish_variety": 0.10,
+    "own_slot_time_pen": 0.25,
+    "bad_center_touch_pen": 0.80,
+    "corner_clear_success": 0.75,
 }
 
 
@@ -143,6 +146,10 @@ class SSLReward:
         r += g["low50"]            * info.get("low50_success", 0.0)
         r += g["back_post_cover"]  * info.get("back_post_ok", 0.0)
         r += g["demo_util"]        * info.get("demo_benefit", 0.0)
+        # Own-slot safety
+        r -= g["own_slot_time_pen"]    * info.get("own_slot_time", 0.0)
+        r -= g["bad_center_touch_pen"] * info.get("bad_center_touch", 0.0)
+        r += g["corner_clear_success"] * info.get("corner_clear_success", 0.0)
 
         # Exploit & conversion
         r += g["exploit_window"]      * info.get("exploit_window", 0.0)
