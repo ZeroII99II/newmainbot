@@ -4,7 +4,8 @@ from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics,
 import numpy as np
 # unify any other alias we might have used earlier
 _np = np
-import math, time
+import math
+import time
 from enum import Enum
 from autosave import ModelAutoSaver
 from mechanics_ssl import SkillTelemetry
@@ -70,6 +71,9 @@ from recovery import RecoveryBrain
 from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy
 from aerial_play import AirDribbleBrain, BackboardDefenseBrain
+from curriculum import STAGES, LOWER_IS_BETTER, combine_reward_boosts
+from progress_store import ProgressStore
+from hud_overlay import draw_hud
 
 # 107-dim obs adapter
 try:
@@ -254,6 +258,20 @@ class Destroyer(BaseAgent):
                 print(f"[Destroyer] Trainer did not start: {e}")
                 self._trainer = None
 
+        # ----- Destroyer Academy: staged curriculum -----
+        self.academy = ProgressStore()
+        self.academy.load()
+        self._progress = 0.0
+        self._progress_last_pass_t = 0.0
+        self._last_overlay_time = 0.0
+        self._hud_on = True  # toggle via FAST_MODE if needed
+
+        # cache a baseline of reward weights if you have them exposed; ok if empty
+        self._base_reward_weights = dict(getattr(self, "reward_weights", {})) if hasattr(self, "reward_weights") else {}
+        self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
+
+        print(f"[Destroyer Academy] Starting at stage: {STAGES[self.academy.stage_idx].name}")
+
         print(f"{BOT_NAME} Ready - Index: {self.index}")
 
         # wall/game time watchdog to detect slow-mo matches
@@ -301,12 +319,15 @@ class Destroyer(BaseAgent):
             self._state_setting_ok = False
 
     def _sample_drill(self):
-        plist = self.drill_probs.get(self.curriculum_phase, [])
-        if not plist:
-            return None
+        import numpy as _np
+        # base phase list
+        plist = list(self.drill_probs.get(self.curriculum_phase, []))
+        # add stage-specific drills
+        stage = STAGES[self.academy.stage_idx]
+        plist.extend(stage.drills)
+        if not plist: return None
         names, weights = zip(*plist)
-        p = _np.array(weights, dtype=_np.float32)
-        p = p / p.sum()
+        p = _np.array(weights, dtype=_np.float32); p = p / p.sum()
         return _np.random.choice(names, p=p)
 
     def _maybe_inject_ssl_drill(self, packet):
@@ -617,6 +638,52 @@ class Destroyer(BaseAgent):
                 self._opp_challenge_early -= 1
         except Exception:
             pass
+        # ===== Stage progress calculation =====
+        spec = STAGES[self.academy.stage_idx]
+
+        # Build metric progress parts in [0..1]
+        prog_parts = []
+        sample_out = {}
+        for key, target, w in spec.goals:
+            val = float(info.get(key, 0.0))
+            if key in LOWER_IS_BETTER:
+                cap = max(target, 1e-3)
+                frac = max(0.0, 1.0 - (val / cap))  # lower is better
+            else:
+                frac = min(1.0, val / max(target, 1e-3))
+            ema = self.academy.ema(f"g:{key}", 0.1)
+            prog = float(ema.update(frac))
+            prog_parts.append((prog, w))
+            if len(sample_out) < 4:
+                sample_out[key] = val
+
+        total_w = sum(w for _, w in prog_parts) or 1.0
+        stage_progress = sum(p*w for p, w in prog_parts) / total_w
+        self._progress = float(self.academy.progress_ema.update(stage_progress))
+
+        # Graduation check
+        gi = packet.game_info
+        elapsed = float(getattr(gi, "seconds_elapsed", 0.0)) if gi else 0.0
+        if self._progress >= spec.graduate_progress_threshold:
+            if self._progress_last_pass_t == 0.0:
+                self._progress_last_pass_t = elapsed
+        else:
+            self._progress_last_pass_t = 0.0
+
+        if (elapsed > spec.min_play_secs and
+            self._progress_last_pass_t and
+            (elapsed - self._progress_last_pass_t) > spec.sustain_secs):
+            # advance stage
+            self.academy.stage_idx = min(self.academy.stage_idx + 1, len(STAGES)-1)
+            self.academy.stage_started_at = time.time()
+            self.academy.save()
+            # refresh stage boosts
+            self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
+            print(f"[Destroyer Academy] Advanced to stage: {STAGES[self.academy.stage_idx].name}")
+            self._progress_last_pass_t = 0.0
+
+        info["_stage_reward_weights"] = self._stage_reward_weights
+
         if packet.game_info.is_kickoff_pause:
             info["kickoff_score"] = 0.2
         reward = self.reward_fn(info)
@@ -638,10 +705,29 @@ class Destroyer(BaseAgent):
                 r.draw_string_2d(10, 10, 1, 1, f"{BOT_NAME} | Idx {self.index} | Buf {n}/{self.buffer.capacity}", r.white())
             except Exception:
                 pass
-            try:
-                self.renderer.draw_string_2d(10, 28, 1, 1, f"Intent: {self._last_intent}", self.renderer.yellow())
-            except Exception:
-                pass
+
+        try:
+            show_hud = (not FAST_MODE) and self._hud_on
+            if show_hud and self.renderer is not None:
+                # Build a short "reasons" string from ctx
+                rP = float(ctx.get("pressure_idx", 0.0))
+                rT = float(ctx.get("threat_idx", 0.0))
+                rO = float(info.get("overcommit_flag", 0.0))
+                rB = float(info.get("boost_delta_norm", 0.0))
+                reasons = f"P:{rP:.2f} T:{rT:.2f} ΔBoost:{rB:+.2f} OC:{rO:.2f}"
+                stage_name = STAGES[self.academy.stage_idx].name
+                draw_hud(self.renderer, 10, 24, stage_name, intent, reasons, self._progress, sample_out)
+        except Exception:
+            pass
+
+        try:
+            gi = packet.game_info
+            if gi and int(gi.seconds_elapsed) % 60 == 0:
+                if not hasattr(self, "_last_stage_save") or int(gi.seconds_elapsed) != self._last_stage_save:
+                    self.academy.save()
+                    self._last_stage_save = int(gi.seconds_elapsed)
+        except Exception:
+            pass
 
         return ctl
 
