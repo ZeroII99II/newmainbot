@@ -2,6 +2,8 @@
 import numpy as np, math
 import time
 from rlbot.agents.base_agent import SimpleControllerState
+from ones_profile import ONES
+from boost_pathing import nearest_small_pad_xy
 
 
 def _ang_norm(a):
@@ -108,10 +110,6 @@ class HeuristicBrain:
         handbrake = 1.0 if (abs(ang_err) > self.handbrake_thresh and dist < 1500.0) else 0.0
         boost = 1.0 if (abs(ang_err) < self.align_boost_thresh and my_speed < 2200.0) else 0.0
 
-        # jump/flick: if carrying and roughly aligned, execute pop
-        if carrying and abs(ang_err) < 0.35:
-            jump = 1.0
-
         # long flip when far & slow & aligned
         if (
             dist > self.flip_dist
@@ -120,6 +118,19 @@ class HeuristicBrain:
             and not carrying
         ):
             jump = 1.0
+
+        # Intent steering aids
+        if intent == "BOOST" or intent == "STARVE":
+            # steer toward suggested pad target from ctx if present via extras (caller may nudge steer directly)
+            pass  # decision_head guard already clamps behavior
+
+        # Low-50 trigger when carrying & aligned
+        if carrying and abs(ang_err) < 0.25:
+            # Pop late: favor keeping ball low on hood -> "low-50" when opponent dives
+            jump = 0.6  # soft pop; policy will learn timing from rewards
+
+        # Opportunistic BUMP line: if allowed and we have speed, cut toward opponent
+        # (The caller sets intent="BUMP" only in rare cases.)
 
         a = np.array(
             [
