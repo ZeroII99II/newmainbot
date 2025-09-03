@@ -1,6 +1,6 @@
 # mechanics_ssl.py — SSL mechanics detectors / telemetry (best-effort heuristics)
 import math, numpy as np
-from ones_profile import ONES
+PAD_RADIUS = 220.0
 from boost_pathing import SMALL_PADS
 
 
@@ -74,7 +74,7 @@ class SkillTelemetry:
 
     def update(self, packet, index):
         info = {}
-        # accept pending external info from bot (e.g., exploit windows, finisher choice)
+        # accept pending external info from bot
         try:
             pending = getattr(self, "_pending_info", {})
             if pending:
@@ -305,7 +305,7 @@ class SkillTelemetry:
         pads = SMALL_PADS
         p2 = np.array([my_loc.x, my_loc.y], dtype=np.float32)
         close = np.min(np.linalg.norm(pads - p2, axis=1))
-        info["small_pad_pickup"] = 1.0 if close < ONES["pad_radius"] else 0.0
+        info["small_pad_pickup"] = 1.0 if close < PAD_RADIUS else 0.0
 
         # Low-50 proxy: under-ball, we jump, ball stays low but gains forward speed
         low50 = (under_ball and latest_touch_me and dz < 350 and abs(ball_vel.y) + abs(ball_vel.x) > 500)
@@ -348,25 +348,17 @@ class SkillTelemetry:
         self._ball_speed_prev = ball_spd
         self._last_touch_me = latest_touch_me
         # Exploit window mirror (from awareness)
-        info["exploit_window"] = float(info.get("exploit_window", info.get("pressure_idx", 0.0) > 0.7))
 
-        # Conversion attempt: if we had an exploit window and we produced a strong shot proxy
         # Shot proxy: ball velocity toward opponent goal increased after our (recent) interaction
         to_opp = 1.0 if ((team==0 and ball_loc.y>0) or (team==1 and ball_loc.y<0)) else 0.0
         speed_toward = (abs(ball_vel.y) + 0.001)
-        info["conversion_attempt"] = 1.0 if (info.get("exploit_window",0.0) > 0.5 and to_opp and speed_toward > 1400) else 0.0
 
         # Success proxy: ball enters net soon after our attempt (coarse)
         # If you already track goals/own touches, replace with precise keys.
         goal_line = 5100 if team==0 else -5100
         scored = ( (team==0 and ball_loc.y > goal_line) or (team==1 and ball_loc.y < goal_line) )
-        info["conversion_success"] = 1.0 if scored else 0.0
 
-        # Finish variety (credit when finish choice changes)
-        last_fin = getattr(self, "_last_finisher_label", "")
-        cur_fin  = info.get("finisher_choice", "")
         info["finish_variety"] = 1.0 if (cur_fin and cur_fin != last_fin) else 0.0
-        self._last_finisher_label = cur_fin
 
         return info
 

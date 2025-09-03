@@ -1,162 +1,31 @@
-# bot.py — Destroyer: resumes from Necto (working copy), hot-reload, kickoff-after-pause, fallback motion
+# bot.py — Destroyer Bronze-only version
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
-import numpy as np
-import configparser, os
-# unify any other alias we might have used earlier
-_np = np
-import math
-import time
-from enum import Enum
-from autosave import ModelAutoSaver
-from mechanics_ssl import SkillTelemetry
-from drills_ssl import (
-    inject_fast_aerial,
-    inject_double_tap,
-    inject_flip_reset,
-    inject_ceiling_shot,
-    inject_dribble_flick,
-    inject_shadow_defense,
-    inject_half_flip,
-    inject_wave_dash,
-    inject_wall_nose_down,
-    inject_ceiling_reset,
-    inject_net_ramp_pop,
-    inject_wall_airdribble,
-    inject_backboard_defense,
-    inject_open_net,
-    inject_bad_recovery,
-    inject_box_clear,
-    inject_box_panic,
-    inject_kickoff_basic,
-    inject_shadow_lane,
-    inject_corner_push_shot,
-    inject_pad_lane,
-)
+import time, numpy as np
 
-# ===== Runtime knobs =====
-BOT_NAME = "Destroyer"
-FAST_MODE = True
-
-# Start conservative; re-enable after motion confirmed
-ENABLE_AERIAL_CURRICULUM = True
-ENABLE_AERIAL_DRILLS = False     # OFF first; turn ON later
-DRILL_INTERVAL_S = 7.0
-
-ENABLE_ONLINE_TRAINER = True     # turn ON so we learn from fallback actions
-TRAINER_STEP_EVERY = 1.0
-TRAINER_BATCH = 512
-TRAINER_LR = 3e-4
-
-ALLOWED_INDICES = {0, 1}         # clean 1v1 only
-
-# ==== Model resume settings ====
-from pathlib import Path
-import shutil
-
-# We prefer to train on a local working copy so the original base file is never overwritten.
-MODEL_PREFERENCE = ["destroyer.pt", "necto-model.pt", "necto.pt", "NectoModel.pt", "model.pt"]
-WORKING_MODEL = "destroyer.pt"
-
-# Extra places to search automatically for the base model:
-MODEL_SEARCH_DIRS = [
-    Path(__file__).parent,                          # repo root
-    Path(__file__).parent / "models",               # optional ./models
-    Path.home() / "AppData/Local/RLBotGUIX/Bots",   # RLBot GUI cache (common)
-    Path(r"C:\\Users\\subze\\AppData\\Local\\RLBotGUIX\\RLBotPackDeletable\\RLBotPack-master\\RLBotPack\\Necto\\Necto"),  # provided path
-]
-
-# ==== Imports from our local modules ====
-from live_policy import LivePolicy
-from ring_buffer import RingBuffer
-from rewards_ssl import SSLReward, DEFAULT_SSL_W
-from kickoff_detector import is_kickoff_pause, detect_spawn_side, Spawn
-from trainer_online_bc import OnlineBC
-from simple_policy import HeuristicBrain
-from kickoff_strats import KickoffDirector
-from awareness_ssl import compute_context, nearest_big_boost
+from awareness_ssl import compute_context
 from decision_head import guard_by_intent
-from recovery import RecoveryBrain
-from ones_profile import ONES
-from boost_pathing import nearest_small_pad_xy
-from aerial_play import AirDribbleBrain, BackboardDefenseBrain
-from finisher import FinisherBrain
-from danger_clear import DangerClearBrain
-# === Curriculum imports: namespaced to avoid local-variable shadowing ===
-import curriculum as academy_spec
-from progress_store import ProgressStore  # if not already imported
-from overlay_pro import draw_overlay
-
-# 107-dim obs adapter
+from drills_ssl import inject_kickoff_basic, inject_shadow_lane, inject_corner_push, inject_box_clear
+from rewards_ssl import SSLReward
 try:
-    from necto_obs import build_obs  # def build_obs(packet, index) -> np.ndarray(107,)
+    from overlay_pro import draw_overlay
+    HAVE_HUD = True
 except Exception:
-    build_obs = None
+    HAVE_HUD = False
 
-# ===== helpers for reward features =====
-def _dot2(ax, ay, bx, by):
-    n1 = math.hypot(ax, ay); n2 = math.hypot(bx, by)
-    if n1 < 1e-6 or n2 < 1e-6: return 0.0
-    return max(-1.0, min(1.0, (ax*bx + ay*by) / (n1*n2)))
+from mechanics_ssl import SkillTelemetry
+from simple_policy import HeuristicBrain
 
-def _sign_to_opp(team):  # rough Y-direction toward opponent goal
-    return -1.0 if team == 0 else 1.0
-
-def _car_airborne(car):
-    try:
-        return (not car.has_wheel_contact) and (car.physics.location.z > 80)
-    except Exception:
-        return car.physics.location.z > 80
-
-def _double_jumped(car):
-    return bool(getattr(car, "double_jumped", False))
-
-def _latest_touch(packet):
-    try:
-        lt = packet.game_ball.latest_touch
-        return lt.player_index, lt.time_seconds
-    except Exception:
-        return None, None
-
-def _car_forward(rot):
-    cp, sp = math.cos(rot.pitch), math.sin(rot.pitch)
-    cy, sy = math.cos(rot.yaw), math.sin(rot.yaw)
-    return (cp*cy, cp*sy, sp)
-
-def _possession_good_boost(boost, progress_cos):
-    return 1.0 if (boost > 20 and progress_cos > 0.1) else 0.0
-
-def _waste_boost(boost, progress_cos):
-    return 1.0 if (boost < 5 and progress_cos < -0.1) else 0.0
-
-def _shadow_cos(my_loc, ball_loc, my_fwd, team):
-    goal_y = -5120 if team == 0 else 5120
-    to_goal = (0 - my_loc.x, goal_y - my_loc.y)
-    to_ball = (ball_loc.x - my_loc.x, ball_loc.y - my_loc.y)
-    return 0.5*_dot2(*to_goal, *to_ball) + 0.5*_dot2(my_fwd[0], my_fwd[1], to_ball[0], to_ball[1])
-
-def _hit_backboard(ball_loc, team):
-    return (ball_loc.y * _sign_to_opp(team)) > 4900 and ball_loc.z > 1200
-
-def _flip_reset_heuristic(car, ball, was_airborne, prev_double_jump):
-    airborne = _car_airborne(car); z = ball.physics.location.z
-    if airborne and z > 800 and not prev_double_jump:
-        return 0.5
-    return 0.0
-
-def _double_tap_heuristic(now, last_backboard_ping, latest_touch_me):
-    if last_backboard_ping > 0 and latest_touch_me and (now - last_backboard_ping) < 1.2:
-        return 1.0
-    return 0.0
+FAST_MODE = False
 
 def to_controller(a: np.ndarray) -> SimpleControllerState:
     ctl = SimpleControllerState()
     steer, throttle, pitch, yaw, roll, jump, boost, handbrake = a.tolist()
-    ctl.steer = float(np.clip(steer, -1, 1))
-    ctl.throttle = float(np.clip(throttle, -1, 1))
-    ctl.pitch = float(np.clip(pitch, -1, 1))
-    ctl.yaw = float(np.clip(yaw, -1, 1))
-    ctl.roll = float(np.clip(roll, -1, 1))
+    ctl.steer = float(np.clip(steer, -1.0, 1.0))
+    ctl.throttle = float(np.clip(throttle, -1.0, 1.0))
+    ctl.pitch = float(np.clip(pitch, -1.0, 1.0))
+    ctl.yaw = float(np.clip(yaw, -1.0, 1.0))
+    ctl.roll = float(np.clip(roll, -1.0, 1.0))
     ctl.jump = bool(jump > 0.5)
     ctl.boost = bool(boost > 0.5)
     ctl.handbrake = bool(handbrake > 0.5)
@@ -164,180 +33,28 @@ def to_controller(a: np.ndarray) -> SimpleControllerState:
 
 class Destroyer(BaseAgent):
     def initialize_agent(self):
-        if self.index not in ALLOWED_INDICES:
-            print(f"[guard] refusing unexpected bot index={self.index}")
-            raise SystemExit(0)
+        # Bronze mode hard-lock
+        self._bronze_mode = True
 
-        # --- Warm-start from existing model(s) ---
-        def _auto_find_model():
-            # 0) Explicit env override wins
-            env_path = os.environ.get("DESTROYER_MODEL")
-            if env_path and Path(env_path).exists():
-                return Path(env_path)
-
-            # 1) Look for preferred names in our search dirs
-            for base in MODEL_SEARCH_DIRS:
-                if not base.exists():
-                    continue
-                # direct check
-                for name in MODEL_PREFERENCE:
-                    p = base / name
-                    if p.exists():
-                        return p
-                # recursive check (safe enough for RLBot dirs)
-                try:
-                    for name in MODEL_PREFERENCE:
-                        for p in base.rglob(name):
-                            return p
-                except Exception:
-                    pass
-            return None
-
-        src_model = _auto_find_model()
-        if src_model is None:
-            print("[Destroyer] WARNING: No base model found. Looked for", MODEL_PREFERENCE, "in", MODEL_SEARCH_DIRS, "and DESTROYER_MODEL env var.")
-        else:
-            # Make a working copy in the repo so we don't overwrite your base file
-            dst = Path(WORKING_MODEL)
-            if not dst.exists():
-                try:
-                    shutil.copy(str(src_model), str(dst))
-                    print(f"[Destroyer] Warm-started working model '{dst.name}' from '{src_model}'")
-                except Exception as e:
-                    print(f"[Destroyer] Copy failed ({e}); will try to load base directly")
-
-        self.policy = LivePolicy(path=WORKING_MODEL, device="cpu",
-                                 fallback_paths=MODEL_PREFERENCE + ([str(src_model)] if src_model else []))
-        self._autosaver = ModelAutoSaver(self.policy, interval_sec=300, checkpoint_dir="checkpoints", max_keep=12)
-        self._autosaver.start()
-        self.reward_fn = SSLReward(DEFAULT_SSL_W)
-        self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
-        self.heur = HeuristicBrain()
-        self.heur.agent = self
-        self.telemetry = SkillTelemetry()
-        self.recovery = RecoveryBrain()
-        self.air_offense = AirDribbleBrain()
-        self.air_defense = BackboardDefenseBrain()
-        self.finisher = FinisherBrain()
-        self.danger_clear = DangerClearBrain()
-        self._last_finish = "POWER_SHOT"
-
-        # curriculum knobs
-        self.CURRICULUM_ON = True
-        self._last_drill_time = 0.0
-        self.DRILL_INTERVAL_S = 8.0
-        # probabilities per curriculum phase (core / aerial / reads)
-        self.drill_probs = {
-            "core":      [("dribble", 0.35), ("shadow", 0.25), ("fast_aerial", 0.15), ("double_tap", 0.10), ("flip_reset", 0.05), ("ceiling", 0.10)],
-            "aerial":    [("fast_aerial", 0.30), ("double_tap", 0.25), ("flip_reset", 0.20), ("ceiling", 0.15), ("dribble", 0.05), ("shadow", 0.05)],
-            "reads":     [("shadow", 0.30), ("dribble", 0.20), ("fast_aerial", 0.15), ("double_tap", 0.15), ("flip_reset", 0.10), ("ceiling", 0.10)],
-        }
-        # add recovery drills into your existing buckets
-        self.drill_probs["core"] += [("wave_dash", 0.15), ("half_flip", 0.15), ("wall_land", 0.10)]
-        self.drill_probs["reads"] += [("wall_land", 0.10), ("net_ramp", 0.10)]
-        self.drill_probs["aerial"] += [("ceiling_reset", 0.15)]
-        self.drill_probs["aerial"] += [("wall_airdribble", 0.30), ("backboard_defense", 0.25)]
-        self.drill_probs["reads"]  += [("backboard_defense", 0.20)]
-        self.drill_probs["reads"]  += [("open_net", 0.25), ("bad_recovery", 0.25)]
-        self.drill_probs["aerial"] += [("bad_recovery", 0.15)]
-        self.drill_probs["reads"]  += [("box_clear", 0.30), ("box_panic", 0.20)]
-        self.drill_probs["core"]   += [("box_clear", 0.20)]
-        self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
-
-        # kickoff tracking + correct timing (after pause)
-        self.kick_prepping = False
-        self.kick_active = False
-        self.kick_t0 = 0.0
-        self.spawn_side = Spawn.MID
-        self.ko_director = KickoffDirector(seed=self.index)
-        self._boost_target = None
-        self._last_intent = "PRESS"
-
-        # score trackers for 'done'
-        self._last_blue_goals = 0
-        self._last_orange_goals = 0
-
-        # aerial heuristics memory
-        self._backboard_ping_time = 0.0
-        self._last_car_airborne = False
-        self._last_double_jump = False
-
-        self._opp_challenge_early = 0  # negative -> late, positive -> early
-
-        # optional online BC trainer (OFF by default; turn on after motion confirmed)
-        self._trainer = None
-        if ENABLE_ONLINE_TRAINER:
-            try:
-                self._trainer = OnlineBC(self.buffer, self.policy,
-                                         out_path=WORKING_MODEL,
-                                         step_every=TRAINER_STEP_EVERY,
-                                         batch=TRAINER_BATCH,
-                                         lr=TRAINER_LR)
-                self._trainer.start()
-            except Exception as e:
-                print(f"[Destroyer] Trainer did not start: {e}")
-                self._trainer = None
-
-        # ----- Destroyer Academy: staged curriculum -----
-        self.academy = ProgressStore()
-        self.academy.load()
-        try:
-            names = [s.name for s in academy_spec.STAGES]
-            print(f"[Destroyer Academy] Stages loaded: {names}")
-        except Exception as e:
-            print(f"[Destroyer Academy] WARNING: could not read STAGES: {e}")
-        self._progress = 0.0
-        self._progress_last_pass_t = 0.0
-        self._last_overlay_time = 0.0
-
-        # Read Bronze Bootcamp lock
-        cfg = configparser.ConfigParser()
-        cfg.read("academy.cfg")
-        start_stage = (cfg.get("Academy", "start_stage", fallback="auto") or "auto").strip()
-        self._lock_stage = cfg.getboolean("Academy", "lock_stage", fallback=False)
-        self._show_hud = cfg.getboolean("Academy", "show_hud", fallback=False)
-        if start_stage.lower() != "auto":
-            try:
-                names = [s.name for s in academy_spec.STAGES]
-                if start_stage in names:
-                    self.academy.stage_idx = names.index(start_stage)
-                    print(f"[Academy] Forced start stage: {start_stage}")
-            except Exception:
-                pass
-
-        # Bronze gating switches
-        self._bronze_mode = (start_stage == "Bronze")
-
-        # cache a baseline of reward weights if you have them exposed; ok if empty
-        self._base_reward_weights = dict(getattr(self, "reward_weights", {})) if hasattr(self, "reward_weights") else {}
-        self._stage_reward_weights = academy_spec.combine_reward_boosts(
-            self._base_reward_weights,
-            academy_spec.STAGES[self.academy.stage_idx]
-        )
-
-        print(f"[Destroyer Academy] Starting at stage: {academy_spec.STAGES[self.academy.stage_idx].name}")
-
-        if getattr(self, "_bronze_mode", False):
-            self.drill_probs["core"]   = [("kickoff_basic", 0.30), ("shadow_lane", 0.30), ("pad_lane", 0.20), ("box_clear", 0.20)]
-            self.drill_probs["reads"]  = [("box_clear", 0.40), ("shadow_lane", 0.60)]
-            self.drill_probs["aerial"] = []
-
-        print(f"{BOT_NAME} Ready - Index: {self.index}")
-
-        # wall/game time watchdog to detect slow-mo matches
-        self._wall_last = time.time()
-        self._game_last = 0.0
-        self._slow_warned = False
-
+        # State-setting probe flags
         self._state_setting_ok = None
         self._state_probe_t0 = 0.0
         self._state_probe_ball_z0 = None
 
-    def retire(self):
-        if getattr(self, "_autosaver", None):
-            self._autosaver.stop()
-        if getattr(self, "_trainer", None):
-            self._trainer.stop()
+        # Drill probabilities (Bronze only)
+        self.drill_probs = {
+            "core":  [("kickoff_basic", 0.30), ("shadow_lane", 0.30), ("pad_lane", 0.0), ("box_clear", 0.40)],
+            "reads": [("box_clear", 0.60), ("shadow_lane", 0.40)],
+            "aerial": []
+        }
+        self.curriculum_phase = "core"  # static
+
+        self.rewarder = SSLReward()
+
+        self.telemetry = SkillTelemetry()
+        self.heur = HeuristicBrain()
+        self.heur.agent = self
+        self._last_ctx = {}
 
     def _probe_state_setting(self, packet):
         """
@@ -348,7 +65,6 @@ class Destroyer(BaseAgent):
             gi = packet.game_info
             if gi is None or gi.is_kickoff_pause:
                 return
-            from rlbot.utils.game_state_util import GameState, BallState, Physics, Vector3
             # Start probe
             if self._state_setting_ok is None and self._state_probe_t0 == 0.0:
                 self._state_probe_ball_z0 = packet.game_ball.physics.location.z
@@ -360,7 +76,6 @@ class Destroyer(BaseAgent):
             if self._state_setting_ok is None and self._state_probe_t0 > 0.0:
                 if gi.seconds_elapsed - self._state_probe_t0 > 0.15:
                     z_now = packet.game_ball.physics.location.z
-                    # Consider success if Z moved at least ~20 units
                     self._state_setting_ok = bool(abs(z_now - self._state_probe_ball_z0) > 20.0)
                     msg = "ENABLED" if self._state_setting_ok else "DISABLED"
                     print(f"[Destroyer] State setting probe: {msg}")
@@ -368,503 +83,89 @@ class Destroyer(BaseAgent):
             # If anything goes wrong, assume disabled to be safe
             self._state_setting_ok = False
 
-    def _sample_drill(self):
-        import numpy as _np
-        # base phase list
-        plist = list(self.drill_probs.get(self.curriculum_phase, []))
-        # add stage-specific drills
-        stage = academy_spec.STAGES[self.academy.stage_idx]
-        plist.extend(stage.drills)
-        if not plist: return None
-        names, weights = zip(*plist)
-        p = _np.array(weights, dtype=_np.float32); p = p / p.sum()
-        return _np.random.choice(names, p=p)
-
     def _maybe_inject_ssl_drill(self, packet):
-        if not self.CURRICULUM_ON or packet.game_info.is_kickoff_pause:
+        import numpy as _np, random
+        if not getattr(self, "_state_setting_ok", False):
             return
-        now = packet.game_info.seconds_elapsed
-        ball = packet.game_ball
-        speed = float(_np.linalg.norm([
-            ball.physics.velocity.x,
-            ball.physics.velocity.y,
-            ball.physics.velocity.z,
-        ]))
-        if (
-            speed < 200
-            and ball.physics.location.z < 120
-            and (now - self._last_drill_time) > self.DRILL_INTERVAL_S
-        ):
-            choice = self._sample_drill()
-            try:
-                if choice == "fast_aerial":
-                    inject_fast_aerial(self)
-                elif choice == "double_tap":
-                    inject_double_tap(self)
-                elif choice == "flip_reset":
-                    inject_flip_reset(self)
-                elif choice == "ceiling":
-                    inject_ceiling_shot(self)
-                elif choice == "dribble":
-                    inject_dribble_flick(self)
-                elif choice == "shadow":
-                    inject_shadow_defense(self)
-                elif choice == "half_flip":
-                    inject_half_flip(self)
-                elif choice == "wave_dash":
-                    inject_wave_dash(self)
-                elif choice == "wall_land":
-                    inject_wall_nose_down(self)
-                elif choice == "ceiling_reset":
-                    inject_ceiling_reset(self)
-                elif choice == "net_ramp":
-                    inject_net_ramp_pop(self)
-                elif choice == "wall_airdribble":
-                    inject_wall_airdribble(self)
-                elif choice == "backboard_defense":
-                    inject_backboard_defense(self)
-                elif choice == "open_net":
-                    inject_open_net(self)
-                elif choice == "bad_recovery":
-                    inject_bad_recovery(self)
-                elif choice == "box_clear":
-                    inject_box_clear(self)
-                elif choice == "box_panic":
-                    inject_box_panic(self)
-                elif choice == "kickoff_basic":
-                    inject_kickoff_basic(self)
-                elif choice == "shadow_lane":
-                    inject_shadow_lane(self)
-                elif choice == "corner_push":
-                    inject_corner_push_shot(self)
-                elif choice == "pad_lane":
-                    inject_pad_lane(self)
-            except Exception:
-                pass
-            self._last_drill_time = now
+        if random.random() > 0.02:  # low frequency to not spam
+            return
+        plist = list(self.drill_probs.get(self.curriculum_phase, []))
+        if not plist:
+            return
+        names, weights = zip(*plist)
+        p = _np.array(weights, dtype=_np.float32)
+        if p.sum() <= 0:
+            return
+        p = p / p.sum()
+        choice = _np.random.choice(names, p=p)
+        if choice == "kickoff_basic":
+            inject_kickoff_basic(self)
+        elif choice == "shadow_lane":
+            inject_shadow_lane(self)
+        elif choice == "corner_push":
+            inject_corner_push(self)
+        elif choice == "box_clear":
+            inject_box_clear(self)
 
-    def _info_from_packet(self, packet) -> dict:
-        info = {}
-        ball = packet.game_ball
-        my = packet.game_cars[self.index]
-        team = self.team
+    def get_output(self, packet):
+        self._probe_state_setting(packet)
+        ctx = compute_context(packet, self.index)
+        self._last_ctx = ctx
 
-        bv = ball.physics.velocity
-        progress_cos = _dot2(bv.x, bv.y, 0.0, _sign_to_opp(team))
-        info["ball_to_opp_goal_cos"] = progress_cos
-        info["ball_speed_gain_norm"] = float(min(1.0, np.linalg.norm([bv.x, bv.y, bv.z]) / 4000.0))
+        info = self.telemetry.update(packet, self.index)
+        # ensure keys used by rewards exist
+        for k in [
+            "kickoff_first_touch","perfect_touch","ball_progress","small_pad_pickup",
+            "back_post_ok","corner_clear_success","own_slot_time","bad_center_touch",
+            "wasted_boost","reverse_ticks"
+        ]:
+            info.setdefault(k, 0.0)
 
-        my_fwd = _car_forward(my.physics.rotation)
-        to_ball = (ball.physics.location.x - my.physics.location.x,
-                   ball.physics.location.y - my.physics.location.y)
-        facing_ball = _dot2(my_fwd[0], my_fwd[1], to_ball[0], to_ball[1])
-        aerial_align = 0.5*facing_ball + 0.5*(1.0 - abs(my.physics.rotation.pitch))
-        info["aerial_alignment_cos"] = float(max(-1.0, min(1.0, aerial_align)))
-        info["gta_transition_flag"] = 1.0 if _car_airborne(my) and abs(my.physics.velocity.z) > 100 else 0.0
+        if ctx.get("danger_zone", False):
+            # Inline corner-clear: steer to near own corner and pop when close
+            me = packet.game_cars[self.index]; ball = packet.game_ball
+            own_goal_y = -5120.0 if me.team == 0 else 5120.0
+            cx = 3072.0 if ball.physics.location.x >= 0 else -3072.0
+            cy = own_goal_y + (500.0 if me.team == 0 else -500.0)
 
-        boost = float(getattr(my, "boost", 33.0))
-        info["boost_use_good"] = _possession_good_boost(boost, progress_cos)
-        info["boost_waste"] = _waste_boost(boost, progress_cos)
-
-        info["shadow_angle_cos"] = _shadow_cos(my.physics.location, ball.physics.location, my_fwd, team)
-        info["last_man_break_flag"] = 0.0
-
-        lt_idx, _ = _latest_touch(packet)
-        now = packet.game_info.seconds_elapsed
-        latest_touch_me = (lt_idx == self.index) if lt_idx is not None else False
-
-        if _hit_backboard(ball.physics.location, team):
-            self._backboard_ping_time = now
-
-        info["double_tap_attempt"] = _double_tap_heuristic(now, self._backboard_ping_time, latest_touch_me)
-        info["flip_reset_attempt"] = _flip_reset_heuristic(my, ball, self._last_car_airborne, self._last_double_jump)
-
-        scores = packet.teams
-        scored = 1.0 if (scores[0].score != self._last_blue_goals or scores[1].score != self._last_orange_goals) else 0.0
-        conceded = 1.0 if scored and ((team == 0 and scores[1].score > self._last_orange_goals) or
-                                      (team == 1 and scores[0].score > self._last_blue_goals)) else 0.0
-        info["scored"] = scored
-        info["conceded"] = conceded
-
-        info["own_goal_touch"] = 0.0
-        info["idle_ticks"] = 0.0
-        info["kickoff_score"] = 0.0
-
-        try:
-            tel = self.telemetry.update(packet, self.index)
-            if tel:
-                info.update(tel)
-        except Exception:
-            pass
-
-        self._last_car_airborne = _car_airborne(my)
-        self._last_double_jump = _double_jumped(my)
-        return info
-
-    # (Aerial drills exist in earlier versions; left off until motion confirmed)
-
-    def get_output(self, packet) -> SimpleControllerState:
-        if packet is not None:
-            self._probe_state_setting(packet)
-        now = time.time()
-        gi = packet.game_info if packet is not None else None
-        if gi is not None:
-            dt_wall = now - self._wall_last
-            dt_game = gi.seconds_elapsed - self._game_last if self._game_last else 0.0
-            if dt_wall > 0.5 and dt_game > 0:
-                ratio = dt_game / dt_wall  # ~1.0 when normal speed
-                if ratio < 0.9 and not self._slow_warned:
-                    print("[Destroyer] Detected slow game time (ratio ~{:.2f}). Check RL Mutators: Game Speed=Default; disable timewarp plugins.".format(ratio))
-                    self._slow_warned = True
-            self._wall_last = now
-            self._game_last = gi.seconds_elapsed
-
-        if packet is None or packet.game_info is None:
-            return SimpleControllerState()
-
-        if build_obs is None:
-            return SimpleControllerState()
-        obs = build_obs(packet, self.index)
-        # --- Observation sanity: ensure 1D float32 np.array of length 107 (Necto obs) ---
-        try:
-            if not isinstance(obs, np.ndarray):
-                obs = np.asarray(obs, dtype=np.float32)
-            else:
-                obs = obs.astype(np.float32, copy=False)
-
-            # Flatten and coerce to 1D
-            if obs.ndim > 1:
-                obs = obs.ravel()
-
-            # Pad or trim to 107 to avoid crashes; emit a single warning once
-            if obs.size != 107:
-                if not hasattr(self, "_warned_obs_shape"):
-                    print(f"[Destroyer] WARNING: obs size={obs.size}, coercing to 107.")
-                    self._warned_obs_shape = True
-                if obs.size < 107:
-                    obs = np.pad(obs, (0, 107 - obs.size), mode="constant")
-                else:
-                    obs = obs[:107]
-        except Exception as e:
-            # Last-resort fallback: zero obs so the bot still returns controls
-            if not hasattr(self, "_warned_obs_fail"):
-                print(f"[Destroyer] ERROR: obs build failed ({e}). Using zeros(107).")
-                self._warned_obs_fail = True
-            obs = np.zeros(107, dtype=np.float32)
-        # --- Awareness / context -> intent
-        ctx = {}
-        try:
-            ctx = compute_context(packet, self.index)
-        except Exception:
-            ctx = {}
-
-        intent = ctx.get("intent", "PRESS")
-        if self._opp_challenge_early > 3 and intent in ("DRIBBLE","CONTROL"):
-            intent = "FAKE"  # bait early challenge
-        if getattr(self, "_bronze_mode", False):
-            BRONZE_ALLOWED = {"SHADOW","CLEAR","CLEAR_CORNER","CONTROL","BOOST","CHALLENGE","SHOOT"}
-            if intent not in BRONZE_ALLOWED:
-                if intent in ("AIR_DRIBBLE","BACKBOARD_DEFEND","EXPLOIT","STARVE","BUMP","FAKE"):
-                    intent = "PRESS" if intent == "EXPLOIT" else "CLEAR"
-                else:
-                    intent = "CONTROL"
-        ctx["intent"] = intent
-        self._last_intent = intent
-
-        try:
-            self.telemetry._pending_info = {"exploit_window": float(ctx.get("exploit_window", 0.0))}
-        except Exception:
-            pass
-        extras = {}
-
-        # Try recovery override first (this is quick & safe)
-        rec_active, rec_action = self.recovery.act(packet, self.index, intent=self._last_intent if hasattr(self, "_last_intent") else None)
-        if rec_active:
-            action = rec_action
+            def _steer_to(tx, ty):
+                import math
+                yaw = float(me.physics.rotation.yaw)
+                yaw_rate = float(getattr(me.physics.angular_velocity, "z", 0.0))
+                ang = math.atan2(ty - me.physics.location.y, tx - me.physics.location.x) - yaw
+                while ang > math.pi:
+                    ang -= 2*math.pi
+                while ang < -math.pi:
+                    ang += 2*math.pi
+                steer = float(np.clip(2.2*ang - 0.7*yaw_rate, -1.0, 1.0))
+                return steer, abs(ang)
+            steer, ang = _steer_to(cx, cy)
+            dist_xy = float(np.hypot(me.physics.location.x - ball.physics.location.x,
+                                     me.physics.location.y - ball.physics.location.y))
+            jump = 1.0 if (ball.physics.location.z < 200.0 and dist_xy < 450.0 and ang < 0.25) else 0.0
+            action = np.array([steer, 1.0, -0.2 if jump else 0.0, 0.0, 0.0,
+                               jump, 1.0 if ang < 0.35 else 0.0, 0.0], dtype=np.float32)
         else:
-            if ctx.get("danger_zone", False) and intent in ("CLEAR_CORNER", "PANIC_CLEAR", "SHADOW", "CLEAR"):
-                ctl = self.danger_clear.act(packet, self.index)
-                action = np.array([
-                    float(ctl.steer or 0.0),
-                    float(ctl.throttle or 0.0),
-                    float(ctl.pitch or 0.0),
-                    float(ctl.yaw or 0.0),
-                    float(ctl.roll or 0.0),
-                    1.0 if ctl.jump else 0.0,
-                    1.0 if ctl.boost else 0.0,
-                    1.0 if ctl.handbrake else 0.0
-                ], dtype=np.float32)
-            elif intent == "EXPLOIT":
-                ctl, fin = self.finisher.act(packet, self.index, ctx)
-                self._last_finish = fin
-                extras["finisher_choice"] = fin
-                try:
-                    self.telemetry._pending_info.update({"finisher_choice": fin})
-                except Exception:
-                    pass
-                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
-                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
-            elif intent == "BACKBOARD_DEFEND":
-                ctl = self.air_defense.act(packet, self.index)
-                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
-                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
-            elif intent == "AIR_DRIBBLE":
-                ctl = self.air_offense.act(packet, self.index, intent=intent)
-                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
-                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
-            else:
-                # 2) Neural policy, then heuristic fallback if weak
-                action = self.policy.act(obs)
-                weak = (not isinstance(action, np.ndarray)) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15
-                if weak:
-                    action = self.heur.action(packet, self.index, intent=intent)
-        # 3) Intent guard (always)
-        action = guard_by_intent(intent, action, ctx)
+            action = self.heur.action(packet, self.index, intent=ctx["intent"])
 
-        # Steering bias toward pad on STARVE/BOOST
-        if intent in ("STARVE","BOOST"):
-            try:
-                pad = ctx.get("pad_target_xy", None)
-                if pad is not None:
-                    me = packet.game_cars[self.index]
-                    dx = float(pad[0] - me.physics.location.x)
-                    dy = float(pad[1] - me.physics.location.y)
-                    desired = math.atan2(dy, dx)
-                    cur = float(me.physics.rotation.yaw)
-                    ang = desired - cur
-                    while ang > math.pi: ang -= 2*math.pi
-                    while ang < -math.pi: ang += 2*math.pi
-                    steer_bias = float(np.clip(2.0*ang - 0.6*getattr(me.physics.angular_velocity,"z",0.0), -1.0, 1.0))
-                    action[0] = float(np.clip(0.7*action[0] + 0.3*steer_bias, -1.0, 1.0))
-            except Exception:
-                pass
+        action = guard_by_intent(ctx["intent"], action, ctx)
 
-        # Rare BUMP route
-        if intent == "BUMP" and ctx.get("allow_demo", False):
-            action[6] = 1.0  # boost on
+        if HAVE_HUD and not FAST_MODE and self.renderer is not None:
+            reasons = f"P:{float(ctx.get('pressure_idx',0.0)):.2f} T:{float(ctx.get('threat_idx',0.0)):.2f} DZ:{int(bool(ctx.get('danger_zone',False)))}"
+            draw_overlay(
+                self.renderer,
+                bot_name="Destroyer",
+                stage="Bronze • Bootcamp",
+                progress=0.0,
+                intent=ctx["intent"],
+                reasons=reasons,
+                last_attempt="",
+                boost=float(getattr(packet.game_cars[self.index], "boost", 33.0)),
+                action8=action,
+                exploit=False, danger=bool(ctx.get("danger_zone", False))
+            )
 
-        # E) optional boost steering aim assist
-        if intent == "BOOST":
-            try:
-                target = ctx.get("nearest_big_boost", None)
-                if target is not None:
-                    me = packet.game_cars[self.index]
-                    dx = float(target[0] - me.physics.location.x)
-                    dy = float(target[1] - me.physics.location.y)
-                    desired_yaw = math.atan2(dy, dx)
-                    cur_yaw = float(me.physics.rotation.yaw)
-                    ang = desired_yaw - cur_yaw
-                    while ang > math.pi: ang -= 2*math.pi
-                    while ang < -math.pi: ang += 2*math.pi
-                    steer_bias = float(np.clip(2.0*ang - 0.6*getattr(me.physics.angular_velocity,"z",0.0), -1.0, 1.0))
-                    action[0] = float(np.clip(0.7*action[0] + 0.3*steer_bias, -1.0, 1.0))
-            except Exception:
-                pass
+        self._maybe_inject_ssl_drill(packet)
+        _ = self.rewarder(info)
 
-        ctl = to_controller(action)
-
-        # --- Kickoff timing: prep during pause; execute after unpause
-        gi = packet.game_info
-        # Arm during pause (but do not execute yet)
-        if is_kickoff_pause(packet):
-            if not self.kick_prepping:
-                self.kick_prepping = True
-                self.kick_active = False
-                self.spawn_side = detect_spawn_side(packet.game_cars[self.index])
-                # decide strategy now
-                self.ko_director.start(self.spawn_side)
-        else:
-            # just left pause: start timer & run kickoff
-            if self.kick_prepping:
-                self.kick_prepping = False
-                self.kick_active = True
-                self.kick_t0 = gi.seconds_elapsed
-
-        # Execute kickoff for ~1.4s after unpause using the selected strategy
-        if self.kick_active:
-            t_since = gi.seconds_elapsed - self.kick_t0
-            ctl = self.ko_director.run(packet, packet.game_cars[self.index], t_since, ctl)
-            if t_since > 1.4:
-                self.kick_active = False
-                # Report outcome from our last reward info (if you compute it later, you can move this)
-                # Simple heuristic: if we touched first and ball moved towards opponent, treat as "good"
-                ball = packet.game_ball
-                to_opp = 1.0 if (ball.physics.velocity.y * (-1.0 if self.team == 0 else 1.0)) > 200 else 0.0
-                scored = False
-                conceded = False
-                # quick check on immediate scoreboard delta
-                scored = (packet.teams[self.team].score > (self._last_blue_goals if self.team == 0 else self._last_orange_goals))
-                conceded = (packet.teams[1 - self.team].score > (self._last_orange_goals if self.team == 0 else self._last_blue_goals))
-                # If neither scored, use direction as proxy
-                if not scored and not conceded:
-                    if to_opp > 0.5:
-                        scored = True  # good kickoff result
-                self.ko_director.report_outcome(self.spawn_side, scored=scored, conceded=conceded)
-
-        # --- Reward + buffer
-        info = self._info_from_packet(packet)
-        if extras:
-            info.update(extras)
-        try:
-            if ctx:
-                info.update(dict(
-                    pressure_idx=ctx.get("pressure_idx", 0.0),
-                    possession_idx=ctx.get("possession_idx", 0.0),
-                    recovery_ok=ctx.get("recovery_ok", False),
-                    overcommit_flag=ctx.get("overcommit_flag", 0.0),
-                ))
-        except Exception:
-            pass
-
-        # Normalize/track for rewards
-        try:
-            info["boost_delta_norm"] = max(-1.0, min(1.0, ctx.get("boost_delta", 0.0) / 50.0))
-            # possession time tracker
-            self._poss_ticks = getattr(self, "_poss_ticks", 0) + (1 if ctx.get("possession_idx", 0.0) > 0.5 else 0)
-            info["possession_ticks_norm"] = float(min(1.0, self._poss_ticks / 300.0))  # scales over ~5s windows
-            # back-post cover check
-            try:
-                me = packet.game_cars[self.index]
-                back_post_x = ctx.get("back_post_x", 0.0)
-                info["back_post_ok"] = 1.0 if (abs(me.physics.location.x - back_post_x) < ONES["back_post_buffer"] and ctx.get("threat_idx",0.0) > 0.3) else 0.0
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # If opponent challenged very early vs our dribble, push memory up; else down
-        try:
-            if info.get("dribble_carry",0.0) > 0.0 and info.get("flick_power",0.0) == 0.0 and ctx.get("threat_idx",0.0) > 0.5:
-                self._opp_challenge_early += 1
-            elif info.get("shadow_good",0.0) > 0.0:
-                self._opp_challenge_early -= 1
-        except Exception:
-            pass
-        # ===== Stage progress calculation =====
-        spec = academy_spec.STAGES[self.academy.stage_idx]
-
-        # Build metric progress parts in [0..1]
-        prog_parts = []
-        sample_out = {}
-        for key, target, w in spec.goals:
-            val = float(info.get(key, 0.0))
-            if key in academy_spec.LOWER_IS_BETTER:
-                cap = max(target, 1e-3)
-                frac = max(0.0, 1.0 - (val / cap))  # lower is better
-            else:
-                frac = min(1.0, val / max(target, 1e-3))
-            ema = self.academy.ema(f"g:{key}", 0.1)
-            prog = float(ema.update(frac))
-            prog_parts.append((prog, w))
-            if len(sample_out) < 4:
-                sample_out[key] = val
-
-        total_w = sum(w for _, w in prog_parts) or 1.0
-        stage_progress = sum(p*w for p, w in prog_parts) / total_w
-        self._progress = float(self.academy.progress_ema.update(stage_progress))
-
-        # Graduation check
-        gi = packet.game_info
-        elapsed = float(getattr(gi, "seconds_elapsed", 0.0)) if gi else 0.0
-        if self._progress >= spec.graduate_progress_threshold:
-            if self._progress_last_pass_t == 0.0:
-                self._progress_last_pass_t = elapsed
-        else:
-            self._progress_last_pass_t = 0.0
-
-        if not getattr(self, "_lock_stage", False):
-            if (elapsed > spec.min_play_secs and
-                self._progress_last_pass_t and
-                (elapsed - self._progress_last_pass_t) > spec.sustain_secs):
-                # advance stage
-                self.academy.stage_idx = min(self.academy.stage_idx + 1, len(academy_spec.STAGES)-1)
-                self.academy.stage_started_at = time.time()
-                self.academy.save()
-                # refresh stage boosts
-                self._stage_reward_weights = academy_spec.combine_reward_boosts(
-                    self._base_reward_weights,
-                    academy_spec.STAGES[self.academy.stage_idx]
-                )
-                print(f"[Destroyer Academy] Advanced to stage: {academy_spec.STAGES[self.academy.stage_idx].name}")
-                self._progress_last_pass_t = 0.0
-        # else: locked — never auto-advance
-
-        info["_stage_reward_weights"] = self._stage_reward_weights
-
-        if packet.game_info.is_kickoff_pause:
-            info["kickoff_score"] = 0.2
-        reward = self.reward_fn(info)
-        done = bool(info["scored"] > 0.5)
-        self.buffer.push(obs, action.astype(np.float32), reward, done)
-
-        if getattr(self, "_state_setting_ok", False):
-            self._maybe_inject_ssl_drill(packet)
-
-        # update scores
-        self._last_blue_goals = packet.teams[0].score
-        self._last_orange_goals = packet.teams[1].score
-
-        # Overlay (disabled in FAST_MODE)
-        if not FAST_MODE:
-            try:
-                r = self.renderer
-                n = self.buffer.capacity if self.buffer.full else self.buffer.ptr
-                r.draw_string_2d(10, 10, 1, 1, f"{BOT_NAME} | Idx {self.index} | Buf {n}/{self.buffer.capacity}", r.white())
-            except Exception:
-                pass
-
-        try:
-            show_hud = (not FAST_MODE) or getattr(self, "_show_hud", False)
-            if show_hud and self.renderer is not None:
-                car = packet.game_cars[self.index]
-                stage_name = academy_spec.STAGES[self.academy.stage_idx].name if hasattr(self, "academy") else "—"
-                if getattr(self, "_bronze_mode", False):
-                    stage_name += " • Bootcamp"
-                progress = float(getattr(self, "_progress", 0.0))
-                reasons = (
-                    f"P:{float(ctx.get('pressure_idx',0.0)):.2f} "
-                    f"T:{float(ctx.get('threat_idx',0.0)):.2f} "
-                    f"ΔBoost:{float(ctx.get('boost_delta',0.0)):+.0f} "
-                    f"DZ:{int(bool(ctx.get('danger_zone',False)))} "
-                    f"EXP:{int(bool(ctx.get('exploit_window',False)))}"
-                )
-                if getattr(self, "_bronze_mode", False):
-                    reasons += (
-                        f"  BC:KO {int(info.get('kickoff_first_touch',0))} "
-                        f" PT {info.get('perfect_touch',0):.2f} "
-                        f" Pads {info.get('small_pad_pickup',0):.0f}"
-                    )
-                last_attempt = getattr(self, "_last_finish", "") or info.get("finisher_choice", "") or ""
-                draw_overlay(
-                    self.renderer,
-                    x=12, y=16,
-                    bot_name="Destroyer",
-                    stage=stage_name,
-                    progress=progress,
-                    intent=str(intent),
-                    reasons=reasons,
-                    last_attempt=last_attempt,
-                    boost=float(getattr(car, "boost", 33.0)),
-                    action8=action,
-                    exploit=bool(ctx.get("exploit_window", False)),
-                    danger=bool(ctx.get("danger_zone", False)),
-                )
-        except Exception:
-            pass
-
-        try:
-            gi = packet.game_info
-            if gi and int(gi.seconds_elapsed) % 60 == 0:
-                if not hasattr(self, "_last_stage_save") or int(gi.seconds_elapsed) != self._last_stage_save:
-                    self.academy.save()
-                    self._last_stage_save = int(gi.seconds_elapsed)
-        except Exception:
-            pass
-
-        return ctl
-
-def create_agent(agent_name, team, index):
-    if index not in ALLOWED_INDICES:
-        print(f"[guard] refusing unexpected bot index={index}")
-        raise SystemExit(0)
-    return Destroyer(agent_name, team, index)
+        return to_controller(action)
