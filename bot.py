@@ -1,19 +1,15 @@
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
-import numpy as np
-
+import numpy as np, math
 try:
-    from rlgym_compat.game_state import GameState
+    from rlgym_compat.game_state import GameState   # new path
 except ImportError:
-    from rlgym_compat import GameState
-
+    from rlgym_compat import GameState              # old path
 from agent import Agent
 from nexto_obs import NextoObsBuilder, BOOST_LOCATIONS
 
-def _clip(x, lo=-1, hi=1): 
-    return float(max(lo, min(hi, x)))
+def _clip(x, lo=-1, hi=1): return float(max(lo, min(hi, x)))
 
 def _steer_to(me, tx, ty, yaw_gain=2.2, d_gain=0.7):
-    import math
     yaw = float(me.physics.rotation.yaw)
     yaw_rate = float(getattr(me.physics.angular_velocity, "z", 0.0))
     ang = math.atan2(ty - me.physics.location.y, tx - me.physics.location.x) - yaw
@@ -27,21 +23,27 @@ def bronze_fallback(packet, index):
     ball = packet.game_ball
     a = np.zeros(8, dtype=np.float32)
 
-    # Danger slot clear-to-corner
+    # Danger zone: front-of-net clear to corner
     own_y = -5120.0 if me.team == 0 else 5120.0
     if me.team == 0:
         y_min, y_max = own_y + 300.0, own_y + 2000.0
     else:
         y_min, y_max = own_y - 2000.0, own_y - 300.0
-    dz = (abs(ball.physics.location.x) <= 1100.0 and y_min <= ball.physics.location.y <= y_max and ball.physics.location.z < 1100.0)
+    dz = (abs(ball.physics.location.x) <= 1100.0
+          and y_min <= ball.physics.location.y <= y_max
+          and ball.physics.location.z < 1100.0)
     if dz:
         cx = 3072.0 if ball.physics.location.x >= 0 else -3072.0
         cy = own_y + (500.0 if me.team == 0 else -500.0)
         steer, ang = _steer_to(me, cx, cy)
         a[0] = steer; a[1] = 1.0; a[6] = 1.0 if ang < 0.35 else 0.0
+        dx = me.physics.location.x - ball.physics.location.x
+        dy = me.physics.location.y - ball.physics.location.y
+        if ball.physics.location.z < 200 and (dx*dx + dy*dy) ** 0.5 < 450 and ang < 0.25:
+            a[5] = 1.0; a[2] = -0.2
         return a
 
-    # Kickoff: straight to center, front-flip when close
+    # Kickoff: drive center, front-flip when close & aligned
     if packet.game_info.is_kickoff_pause:
         steer, ang = _steer_to(me, 0.0, 0.0)
         a[0] = steer; a[1] = 1.0; a[6] = 1.0 if ang < 0.2 else 0.0
@@ -50,7 +52,7 @@ def bronze_fallback(packet, index):
             a[5] = 1.0; a[2] = 1.0
         return a
 
-    # Otherwise: simple approach to ball with slight far-post bias
+    # Default: simple controlled push with far-post bias
     gy = (5120.0 if me.team == 0 else -5120.0) * 0.92
     aim_x = float(np.clip(ball.physics.location.x * 0.7, -900, 900))
     steer, ang = _steer_to(me, aim_x, gy)
@@ -79,14 +81,9 @@ class Nexto(BaseAgent):
         if self.stochastic_kickoffs and packet.game_info.is_kickoff_pause:
             beta = 0.5
 
-        act = None; weights = None
-        try:
-            act, weights = self.agent.act(obs, beta)
-        except Exception:
-            act = None
-
+        act, weights = (self.agent.act(obs, beta) if getattr(self, "agent", None) is not None else (None, None))
         if act is None:
-            # No model / failed → Bronze fallback
+            # No model / torch missing / load failed → safe Bronze behavior
             self.action = bronze_fallback(packet, self.index)
         else:
             self.action = act

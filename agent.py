@@ -17,21 +17,19 @@ except Exception:
 
 class Agent:
     def __init__(self):
-        cur_dir = os.path.dirname(os.path.realpath(__file__))
-
-        # Look for a model in these common names/locations
+        cur = os.path.dirname(os.path.realpath(__file__))
+        # Prefer our own Bronze model, but accept nexto-model.pt too
         candidates = [
-            os.path.join(cur_dir, "models", "destroyer_Bronze_latest.pt"),
-            os.path.join(cur_dir, "destroyer_Bronze_latest.pt"),
-            os.path.join(cur_dir, "nexto-model.pt"),
+            os.path.join(cur, "models", "destroyer_Bronze_latest.pt"),
+            os.path.join(cur, "destroyer_Bronze_latest.pt"),
+            os.path.join(cur, "nexto-model.pt"),
         ]
-
         self.actor = None
         if TORCH_OK:
-            for path in candidates:
-                if os.path.exists(path):
+            for p in candidates:
+                if os.path.exists(p):
                     try:
-                        with open(path, "rb") as f:
+                        with open(p, "rb") as f:
                             self.actor = torch.jit.load(f, map_location="cpu")
                         break
                     except Exception:
@@ -39,7 +37,7 @@ class Agent:
             if self.actor is not None:
                 torch.set_num_threads(1)
 
-        self._lookup_table = self.make_lookup_table()
+        self._lookup_table = self.make_lookup_table()  # keep existing implementation
         self.state = None
 
     def make_lookup_table(self):
@@ -57,16 +55,14 @@ class Agent:
         if (not TORCH_OK) or (self.actor is None):
             return None, None
 
-        import math
         state = tuple(torch.from_numpy(s).float() for s in state)
         with torch.no_grad():
             out, weights = self.actor(state)
 
         out = (out,)
         max_shape = max(o.shape[-1] for o in out)
-        import torch.nn.functional as F
         logits = torch.stack(
-            [l if l.shape[-1] == max_shape else F.pad(l, (0, max_shape - l.shape[-1]), value=float("-inf"))],
+            [o if o.shape[-1] == max_shape else F.pad(o, (0, max_shape - o.shape[-1]), value=float("-inf"))],
             dim=1
         )
 
@@ -78,7 +74,8 @@ class Agent:
             if beta == 0:
                 logits[torch.isfinite(logits)] = 0
             else:
-                logits *= math.log((beta + 1) / (1 - beta), 3)
+                import math as _m
+                logits *= _m.log((beta + 1) / (1 - beta), 3)
             dist = Categorical(logits=logits)
             actions = dist.sample()
 

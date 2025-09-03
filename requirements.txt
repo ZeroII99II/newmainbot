@@ -1,9 +1,10 @@
-rlbot==1.*
-numpy==1.26.4
-rlgym-compat>=1.1    # allow newer compat
+rlbot>=1.33,<2
+numpy>=1.23
+rlgym-compat>=1.1
 
-# Torch is optional; only needed if you want to load a model at runtime.
+# Optional: only needed if you want to load a TorchScript model at runtime.
 --find-links https://download.pytorch.org/whl/torch_stable.html
 torch==2.0.1+cpu
 
 pip
+
