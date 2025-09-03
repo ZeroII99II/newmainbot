@@ -198,6 +198,44 @@ def inject_half_flip(agent):
         agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
 
 
+def inject_wall_airdribble(agent):
+    team = agent.team
+    side = -1 if np.random.rand() < 0.5 else 1
+    ball_x = 2200 * side
+    ball_y = -1500 if team==0 else 1500
+    car_x  = ball_x - 500 * side
+    car_y  = ball_y - (450 * (-1 if team==0 else 1))
+    car_z  = 50
+    ball_z = 200
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, car_z),
+                                         rotation=Rotator(0, 0, 0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=100)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, ball_z),
+                                           velocity=Vector3(0, 0, 0)))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
+def inject_backboard_defense(agent):
+    team = agent.team
+    # ball toward our backboard
+    ball_x = np.random.uniform(-1200, 1200)
+    ball_y = -4200 if team==0 else 4200
+    ball_z = np.random.uniform(900, 1400)
+    bvy = -700 if team==1 else 700  # moving toward our board
+    car_x  = np.random.uniform(-1200, 1200)
+    car_y  = -2400 if team==0 else 2400
+    car_state = CarState(physics=Physics(location=Vector3(car_x, car_y, 50),
+                                         rotation=Rotator(0, 0, 0),
+                                         velocity=Vector3(0,0,0)),
+                         boost_amount=60)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, ball_z),
+                                           velocity=Vector3(0, bvy, np.random.uniform(-50, 150))))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state}))
+
+
 def inject_wave_dash(agent):
     # Small hop then land — encourage wave dash
     team = agent.team

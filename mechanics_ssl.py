@@ -303,6 +303,20 @@ class SkillTelemetry:
         low50 = (under_ball and latest_touch_me and dz < 350 and abs(ball_vel.y) + abs(ball_vel.x) > 500)
         info["low50_success"] = 1.0 if low50 else 0.0
 
+        # Air-dribble control: consecutive airborne self touches at z>600 with speed under control
+        info["air_dribble_ctrl"] = float(min(1.0, info.get("air_dribble_chain", 0.0)))
+
+        # Backboard save: our touch near own backboard at z>900 and ball exits toward corner (x moving outward)
+        own_board = ( (team==0 and ball_loc.y < -4900) or (team==1 and ball_loc.y > 4900) )
+        outward = abs(ball_vel.x) > 400
+        backboard_save = (own_board and latest_touch_me and ball_loc.z > 900 and outward)
+        info["backboard_save"] = 1.0 if backboard_save else 0.0
+
+        # Corner clear quality after save: ball speed toward side + downward
+        sideward = abs(ball_vel.x) > 700
+        downward = ball_vel.z < -150
+        info["corner_clear_quality"] = 1.0 if (backboard_save and sideward and downward) else 0.0
+
         # store for next tick
         self._ball_speed_prev = ball_spd
         self._last_touch_me = latest_touch_me

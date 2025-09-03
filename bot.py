@@ -18,6 +18,8 @@ from drills_ssl import (
     inject_wall_nose_down,
     inject_ceiling_reset,
     inject_net_ramp_pop,
+    inject_wall_airdribble,
+    inject_backboard_defense,
 )
 
 # ===== Runtime knobs =====
@@ -65,6 +67,7 @@ from decision_head import guard_by_intent
 from recovery import RecoveryBrain
 from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy
+from aerial_play import AirDribbleBrain, BackboardDefenseBrain
 
 # 107-dim obs adapter
 try:
@@ -194,6 +197,8 @@ class Destroyer(BaseAgent):
         self.heur = HeuristicBrain()
         self.telemetry = SkillTelemetry()
         self.recovery = RecoveryBrain()
+        self.air_offense = AirDribbleBrain()
+        self.air_defense = BackboardDefenseBrain()
 
         # curriculum knobs
         self.CURRICULUM_ON = True
@@ -209,6 +214,8 @@ class Destroyer(BaseAgent):
         self.drill_probs["core"] += [("wave_dash", 0.15), ("half_flip", 0.15), ("wall_land", 0.10)]
         self.drill_probs["reads"] += [("wall_land", 0.10), ("net_ramp", 0.10)]
         self.drill_probs["aerial"] += [("ceiling_reset", 0.15)]
+        self.drill_probs["aerial"] += [("wall_airdribble", 0.30), ("backboard_defense", 0.25)]
+        self.drill_probs["reads"]  += [("backboard_defense", 0.20)]
         self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
 
         # kickoff tracking + correct timing (after pause)
@@ -339,6 +346,10 @@ class Destroyer(BaseAgent):
                     inject_ceiling_reset(self)
                 elif choice == "net_ramp":
                     inject_net_ramp_pop(self)
+                elif choice == "wall_airdribble":
+                    inject_wall_airdribble(self)
+                elif choice == "backboard_defense":
+                    inject_backboard_defense(self)
             except Exception:
                 pass
             self._last_drill_time = now
@@ -446,11 +457,22 @@ class Destroyer(BaseAgent):
         if rec_active:
             action = rec_action
         else:
-            action = self.policy.act(obs)
-            weak = (not isinstance(action, np.ndarray)) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15
-            if weak:
-                action = self.heur.action(packet, self.index, intent=intent)
-        # Then your existing intent guard:
+            # 1) Aerial overrides by intent
+            if intent == "BACKBOARD_DEFEND":
+                ctl = self.air_defense.act(packet, self.index)
+                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
+                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
+            elif intent == "AIR_DRIBBLE":
+                ctl = self.air_offense.act(packet, self.index, intent=intent)
+                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
+                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
+            else:
+                # 2) Neural policy, then heuristic fallback if weak
+                action = self.policy.act(obs)
+                weak = (not isinstance(action, np.ndarray)) or action.shape[0] != 8 or np.any(np.isnan(action)) or float(np.linalg.norm(action[:2])) < 0.15
+                if weak:
+                    action = self.heur.action(packet, self.index, intent=intent)
+        # 3) Intent guard (always)
         action = guard_by_intent(intent, action, ctx)
 
         # Steering bias toward pad on STARVE/BOOST

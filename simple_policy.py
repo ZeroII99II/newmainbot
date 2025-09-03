@@ -119,6 +119,15 @@ class HeuristicBrain:
         ):
             jump = 1.0
 
+        # If we were asked to AIR_DRIBBLE, bias toward sidewall carry & gentle pop
+        if intent == "AIR_DRIBBLE":
+            # favor boost only when aligned; encourage small jump when under-ball near wall
+            if abs(me.physics.location.x) > 1800 and 60 < (ball.physics.location.z - me.physics.location.z) < 220 and abs(ang_err) < 0.35:
+                jump = 1.0
+            boost = 1.0 if abs(ang_err) < 0.25 else 0.0
+            # slight nose up
+            pitch = -0.15
+
         # Intent steering aids
         if intent == "BOOST" or intent == "STARVE":
             # steer toward suggested pad target from ctx if present via extras (caller may nudge steer directly)
