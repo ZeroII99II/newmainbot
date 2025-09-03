@@ -2,7 +2,6 @@
 import numpy as np, math
 import time
 from rlbot.agents.base_agent import SimpleControllerState
-from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy
 
 
@@ -83,7 +82,8 @@ class HeuristicBrain:
 
         ball_pos = _vec(ball.physics.location.x, ball.physics.location.y)
         ball_vel = _vec(ball.physics.velocity.x, ball.physics.velocity.y)
-        dist = float(np.linalg.norm(ball_pos - my_pos))
+        dist_ball = float(np.linalg.norm(ball_pos - my_pos))
+        dist = dist_ball
 
         # carry detection
         under_ball = (
@@ -109,13 +109,15 @@ class HeuristicBrain:
         throttle = -0.5 if abs(ang_err) > 2.35 else 1.0
         handbrake = 1.0 if (abs(ang_err) > self.handbrake_thresh and dist < 1500.0) else 0.0
         boost = 1.0 if (abs(ang_err) < self.align_boost_thresh and my_speed < 2200.0) else 0.0
-
-        # Bronze Bootcamp helpers
-        if getattr(self.agent, "_bronze_mode", False):
-            boost = 1.0 if abs(ang_err) < 0.25 else 0.0
-            if bool(getattr(packet.game_info, "is_kickoff_pause", False)) and abs(ang_err) < 0.2 and dist < 450:
+        # Bronze-only helpers (safe if agent._bronze_mode missing)
+        ctx = getattr(self.agent, "_last_ctx", {})
+        if getattr(self.agent, "_bronze_mode", True):
+            if abs(ang_err) > 0.35:
+                boost = 0.0
+            if ctx.get("is_kickoff", False) and abs(ang_err) < 0.2 and dist_ball < 450:
                 jump = 1.0
                 pitch = 1.0  # front-flip
+
 
         # long flip when far & slow & aligned
         if (
@@ -126,14 +128,6 @@ class HeuristicBrain:
         ):
             jump = 1.0
 
-        # If we were asked to AIR_DRIBBLE, bias toward sidewall carry & gentle pop
-        if intent == "AIR_DRIBBLE":
-            # favor boost only when aligned; encourage small jump when under-ball near wall
-            if abs(me.physics.location.x) > 1800 and 60 < (ball.physics.location.z - me.physics.location.z) < 220 and abs(ang_err) < 0.35:
-                jump = 1.0
-            boost = 1.0 if abs(ang_err) < 0.25 else 0.0
-            # slight nose up
-            pitch = -0.15
 
         # Intent steering aids
         if intent == "BOOST" or intent == "STARVE":
