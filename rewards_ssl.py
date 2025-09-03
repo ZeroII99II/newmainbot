@@ -58,12 +58,24 @@ DEFAULT_SSL_W = {
 }
 
 
+def _apply_stage_boosts(weights: dict, info: dict):
+    # Optional stage-level multipliers injected from bot.py via info["_stage_reward_weights"]
+    boosts = info.get("_stage_reward_weights", None)
+    if not boosts:
+        return weights
+    w = dict(weights)
+    for k, m in boosts.items():
+        if k in w:
+            w[k] = w[k] * float(m)
+    return w
+
+
 class SSLReward:
     def __init__(self, w=None):
         self.w = w or DEFAULT_SSL_W
 
     def __call__(self, info: dict) -> float:
-        g = self.w
+        g = _apply_stage_boosts(self.w, info)
         r = 0.0
         # Core mastery
         r += g["speedflip"] * info.get("kickoff_first_touch", 0.0)
