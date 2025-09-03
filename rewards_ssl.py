@@ -46,6 +46,12 @@ DEFAULT_SSL_W = {
     "ceiling_reset_w": 0.15,
     "net_ramp_reset_w": 0.10,
     "wall_nose_down_w": 0.15,
+    "small_pads": 0.20,
+    "boost_delta": 0.15,
+    "possession_time": 0.25,
+    "low50": 0.30,
+    "back_post_cover": 0.25,
+    "demo_util": 0.25,
 }
 
 
@@ -105,6 +111,14 @@ class SSLReward:
         r += g["ceiling_reset_w"]    * info.get("ceiling_reset_exec", 0.0)
         r += g["net_ramp_reset_w"]   * info.get("net_ramp_reset_exec", 0.0)
         r += g["wall_nose_down_w"]   * info.get("wall_nose_down", 0.0)
+
+        # 1s-specific
+        r += g["small_pads"]       * info.get("small_pad_pickup", 0.0)
+        r += g["boost_delta"]      * max(0.0, info.get("boost_delta_norm", 0.0))
+        r += g["possession_time"]  * info.get("possession_ticks_norm", 0.0)
+        r += g["low50"]            * info.get("low50_success", 0.0)
+        r += g["back_post_cover"]  * info.get("back_post_ok", 0.0)
+        r += g["demo_util"]        * info.get("demo_benefit", 0.0)
 
         return float(max(-1.0, min(1.0, r)))
 

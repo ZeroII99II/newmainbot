@@ -63,6 +63,8 @@ from kickoff_strats import KickoffDirector
 from awareness_ssl import compute_context, nearest_big_boost
 from decision_head import guard_by_intent
 from recovery import RecoveryBrain
+from ones_profile import ONES
+from boost_pathing import nearest_small_pad_xy
 
 # 107-dim obs adapter
 try:
@@ -226,6 +228,8 @@ class Destroyer(BaseAgent):
         self._backboard_ping_time = 0.0
         self._last_car_airborne = False
         self._last_double_jump = False
+
+        self._opp_challenge_early = 0  # negative -> late, positive -> early
 
         # optional online BC trainer (OFF by default; turn on after motion confirmed)
         self._trainer = None
@@ -432,6 +436,9 @@ class Destroyer(BaseAgent):
             ctx = {}
 
         intent = ctx.get("intent", "PRESS")
+        if self._opp_challenge_early > 3 and intent in ("DRIBBLE","CONTROL"):
+            intent = "FAKE"  # bait early challenge
+        ctx["intent"] = intent
         self._last_intent = intent
 
         # Try recovery override first (this is quick & safe)
@@ -445,6 +452,29 @@ class Destroyer(BaseAgent):
                 action = self.heur.action(packet, self.index, intent=intent)
         # Then your existing intent guard:
         action = guard_by_intent(intent, action, ctx)
+
+        # Steering bias toward pad on STARVE/BOOST
+        if intent in ("STARVE","BOOST"):
+            try:
+                pad = ctx.get("pad_target_xy", None)
+                if pad is not None:
+                    import math, numpy as np
+                    me = packet.game_cars[self.index]
+                    dx = float(pad[0] - me.physics.location.x)
+                    dy = float(pad[1] - me.physics.location.y)
+                    desired = math.atan2(dy, dx)
+                    cur = float(me.physics.rotation.yaw)
+                    ang = desired - cur
+                    while ang > math.pi: ang -= 2*math.pi
+                    while ang < -math.pi: ang += 2*math.pi
+                    steer_bias = float(np.clip(2.0*ang - 0.6*getattr(me.physics.angular_velocity,"z",0.0), -1.0, 1.0))
+                    action[0] = float(np.clip(0.7*action[0] + 0.3*steer_bias, -1.0, 1.0))
+            except Exception:
+                pass
+
+        # Rare BUMP route
+        if intent == "BUMP" and ctx.get("allow_demo", False):
+            action[6] = 1.0  # boost on
 
         # E) optional boost steering aim assist
         if intent == "BOOST":
@@ -514,6 +544,31 @@ class Destroyer(BaseAgent):
                     recovery_ok=ctx.get("recovery_ok", False),
                     overcommit_flag=ctx.get("overcommit_flag", 0.0),
                 ))
+        except Exception:
+            pass
+
+        # Normalize/track for rewards
+        try:
+            info["boost_delta_norm"] = max(-1.0, min(1.0, ctx.get("boost_delta", 0.0) / 50.0))
+            # possession time tracker
+            self._poss_ticks = getattr(self, "_poss_ticks", 0) + (1 if ctx.get("possession_idx", 0.0) > 0.5 else 0)
+            info["possession_ticks_norm"] = float(min(1.0, self._poss_ticks / 300.0))  # scales over ~5s windows
+            # back-post cover check
+            try:
+                me = packet.game_cars[self.index]
+                back_post_x = ctx.get("back_post_x", 0.0)
+                info["back_post_ok"] = 1.0 if (abs(me.physics.location.x - back_post_x) < ONES["back_post_buffer"] and ctx.get("threat_idx",0.0) > 0.3) else 0.0
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # If opponent challenged very early vs our dribble, push memory up; else down
+        try:
+            if info.get("dribble_carry",0.0) > 0.0 and info.get("flick_power",0.0) == 0.0 and ctx.get("threat_idx",0.0) > 0.5:
+                self._opp_challenge_early += 1
+            elif info.get("shadow_good",0.0) > 0.0:
+                self._opp_challenge_early -= 1
         except Exception:
             pass
         if packet.game_info.is_kickoff_pause:

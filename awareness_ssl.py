@@ -1,4 +1,6 @@
 import math, numpy as np
+from ones_profile import ONES
+from boost_pathing import nearest_small_pad_xy, football_lane
 
 SUP = 2300.0  # supersonic speed cap (uu/s) for quick ETAs
 
@@ -133,6 +135,40 @@ def compute_context(packet, index):
     # Allow riskier choices when risk high
     if risk > 0.7 and intent in ("DRIBBLE","PRESS") and in_opp_half:
         intent = "FAKE" if np.linalg.norm(b_v) < 900.0 else "CHALLENGE"
+
+    # --- 1s specifics: boost delta, clock/score tempo, small-pad targets, demo line ---
+    my_boost = float(getattr(me, "boost", 33.0))
+    opp_boost = float(getattr(opp, "boost", 33.0)) if opp is not None else 33.0
+    boost_delta = my_boost - opp_boost
+    ctx["boost_delta"] = boost_delta
+
+    # Small-pad target suggestion (prefer our half when defending)
+    half_sign = -1.0 if team == 0 else 1.0
+    pad_def = football_lane(my_p[0], my_p[1], to_defense=(threat_raw > 0.4))
+    ctx["pad_target_xy"] = pad_def  # 2D
+
+    # Tempo control: if leading late or with boost edge, bias to CONTROL/DRIBBLE
+    time_left_approx = max(0.0, 300.0 - float(getattr(gi, "seconds_elapsed", 0.0)) % 300.0)
+    leading = (packet.teams[team].score > packet.teams[1-team].score)
+    if (leading and time_left_approx < ONES["tempo_slow_lead_secs"]) or (boost_delta > ONES["tempo_slow_boost_edge"] and in_opp_half):
+        if intent in ("PRESS", "CHALLENGE", "SHOOT"):
+            intent = "CONTROL"  # slow the game, force mistakes
+
+    # Low-50 window: if we can get under-ball soon in front of opp
+    under_lane = (abs(b_p[2] - my_p[2]) < 240 and np.linalg.norm(b_p[:2]-my_p[:2]) < ONES["low50_distance"])
+    if possession and under_lane and eta_me_ball < eta_opp_ball:
+        intent = "DRIBBLE"  # then heuristic can trigger pop/low-50
+
+    # Back-post defense bias
+    ctx["back_post_x"] = back_post[0]
+
+    # Starve: if we have pressure + edge, allow STARVE (steal pads/boost in their half)
+    if pressure_raw > 0.6 and boost_delta >= 10.0 and in_opp_half and ONES["starve_when_edge"]:
+        intent = "STARVE"
+
+    # Demo line: if supersonic towards opp and path free near ball
+    ctx["allow_demo"] = bool( (eta_me_ball < 0.7) and (_norm(my_v) > ONES["demo_min_speed"]) )
+    ctx["intent"] = intent
 
     ctx.update(dict(
         pressure_idx=float(max(0.0, min(1.0, pressure_raw))),

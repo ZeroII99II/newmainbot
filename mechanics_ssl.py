@@ -1,5 +1,7 @@
 # mechanics_ssl.py — SSL mechanics detectors / telemetry (best-effort heuristics)
 import math, numpy as np
+from ones_profile import ONES
+from boost_pathing import SMALL_PADS
 
 
 def _hyp2(x, y):
@@ -290,6 +292,16 @@ class SkillTelemetry:
             0.25 * info.get("half_flip_exec", 0.0) +
             0.10 * info.get("wall_nose_down", 0.0)
         )
+
+        # Small-pad pickup: if near any small-pad point this tick
+        pads = SMALL_PADS
+        p2 = np.array([my_loc.x, my_loc.y], dtype=np.float32)
+        close = np.min(np.linalg.norm(pads - p2, axis=1))
+        info["small_pad_pickup"] = 1.0 if close < ONES["pad_radius"] else 0.0
+
+        # Low-50 proxy: under-ball, we jump, ball stays low but gains forward speed
+        low50 = (under_ball and latest_touch_me and dz < 350 and abs(ball_vel.y) + abs(ball_vel.x) > 500)
+        info["low50_success"] = 1.0 if low50 else 0.0
 
         # store for next tick
         self._ball_speed_prev = ball_spd
