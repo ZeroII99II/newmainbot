@@ -1,4 +1,9 @@
-rlbot>=1.33,<2
-numpy>=1.21
+rlbot==1.*
+numpy>=1.23
+rlgym-compat>=1.1   # allow newer compat
 
-torch ; python_version >= "3.10"
+# Optional: only needed if you want to run a TorchScript model at runtime.
+--find-links https://download.pytorch.org/whl/torch_stable.html
+torch==2.0.1+cpu
+
+pip
