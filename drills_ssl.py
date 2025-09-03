@@ -287,3 +287,31 @@ def inject_net_ramp_pop(agent):
         agent.set_game_state(GameState(cars={agent.index: car_state}))
 
 
+def inject_open_net(agent):
+    team = agent.team
+    # Put ball center-top of box; opponent out of lane
+    ball_x = np.random.uniform(-600, 600)
+    ball_y = 3600 if team==0 else -3600
+    car_y  = ball_y - (900 if team==0 else -900)
+    opp_y  = ball_y + (1600 if team==0 else -1600)
+    opp_x  = 2200 if np.random.rand()<0.5 else -2200
+    car_state_me = CarState(physics=Physics(location=Vector3(0, car_y, 50), rotation=Rotator(0, 0, 0), velocity=Vector3(0,0,0)), boost_amount=60)
+    car_state_opp = CarState(physics=Physics(location=Vector3(opp_x, opp_y, 50), rotation=Rotator(0, 0, 0), velocity=Vector3(0,0,0)), boost_amount=10)
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, 160), velocity=Vector3(0,0,0)))
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state_me, 1-agent.index: car_state_opp}))
+
+
+def inject_bad_recovery(agent):
+    team = agent.team
+    # Opponent airborne/low boost; ball bouncing in their half
+    ball_x = np.random.uniform(-800, 800)
+    ball_y = 2800 if team==0 else -2800
+    ball_state = BallState(physics=Physics(location=Vector3(ball_x, ball_y, 300), velocity=Vector3(0,0,300)))
+    opp_y  = ball_y + (900 if team==0 else -900)
+    car_state_opp = CarState(physics=Physics(location=Vector3(ball_x+600, opp_y, 500), rotation=Rotator(0,0,0), velocity=Vector3(0,0,0)), boost_amount=0.0)
+    car_state_me = CarState(physics=Physics(location=Vector3(ball_x-800, ball_y-800*(1 if team==0 else -1), 60), rotation=Rotator(0,0,0), velocity=Vector3(0,0,0)), boost_amount=50)
+    if getattr(agent, "_state_setting_ok", False):
+        agent.set_game_state(GameState(ball=ball_state, cars={agent.index: car_state_me, 1-agent.index: car_state_opp}))
+
+

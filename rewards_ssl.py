@@ -55,6 +55,10 @@ DEFAULT_SSL_W = {
     "low50": 0.30,
     "back_post_cover": 0.25,
     "demo_util": 0.25,
+    "exploit_window": 0.25,
+    "conversion_attempt": 0.35,
+    "conversion_success": 1.50,
+    "finish_variety": 0.10,
 }
 
 
@@ -139,6 +143,12 @@ class SSLReward:
         r += g["low50"]            * info.get("low50_success", 0.0)
         r += g["back_post_cover"]  * info.get("back_post_ok", 0.0)
         r += g["demo_util"]        * info.get("demo_benefit", 0.0)
+
+        # Exploit & conversion
+        r += g["exploit_window"]      * info.get("exploit_window", 0.0)
+        r += g["conversion_attempt"]  * info.get("conversion_attempt", 0.0)
+        r += g["conversion_success"]  * info.get("conversion_success", 0.0)
+        r += g["finish_variety"]      * info.get("finish_variety", 0.0)
 
         return float(max(-1.0, min(1.0, r)))
 

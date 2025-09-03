@@ -23,6 +23,8 @@ from drills_ssl import (
     inject_net_ramp_pop,
     inject_wall_airdribble,
     inject_backboard_defense,
+    inject_open_net,
+    inject_bad_recovery,
 )
 
 # ===== Runtime knobs =====
@@ -71,6 +73,7 @@ from recovery import RecoveryBrain
 from ones_profile import ONES
 from boost_pathing import nearest_small_pad_xy
 from aerial_play import AirDribbleBrain, BackboardDefenseBrain
+from finisher import FinisherBrain
 from curriculum import STAGES, LOWER_IS_BETTER, combine_reward_boosts
 from progress_store import ProgressStore
 from hud_overlay import draw_hud
@@ -205,6 +208,8 @@ class Destroyer(BaseAgent):
         self.recovery = RecoveryBrain()
         self.air_offense = AirDribbleBrain()
         self.air_defense = BackboardDefenseBrain()
+        self.finisher = FinisherBrain()
+        self._last_finish = "POWER_SHOT"
 
         # curriculum knobs
         self.CURRICULUM_ON = True
@@ -222,6 +227,8 @@ class Destroyer(BaseAgent):
         self.drill_probs["aerial"] += [("ceiling_reset", 0.15)]
         self.drill_probs["aerial"] += [("wall_airdribble", 0.30), ("backboard_defense", 0.25)]
         self.drill_probs["reads"]  += [("backboard_defense", 0.20)]
+        self.drill_probs["reads"]  += [("open_net", 0.25), ("bad_recovery", 0.25)]
+        self.drill_probs["aerial"] += [("bad_recovery", 0.15)]
         self.curriculum_phase = "reads"  # start with reads/defense bias for SSL consistency
 
         # kickoff tracking + correct timing (after pause)
@@ -373,6 +380,10 @@ class Destroyer(BaseAgent):
                     inject_wall_airdribble(self)
                 elif choice == "backboard_defense":
                     inject_backboard_defense(self)
+                elif choice == "open_net":
+                    inject_open_net(self)
+                elif choice == "bad_recovery":
+                    inject_bad_recovery(self)
             except Exception:
                 pass
             self._last_drill_time = now
@@ -498,13 +509,28 @@ class Destroyer(BaseAgent):
         ctx["intent"] = intent
         self._last_intent = intent
 
+        try:
+            self.telemetry._pending_info = {"exploit_window": float(ctx.get("exploit_window", 0.0))}
+        except Exception:
+            pass
+        extras = {}
+
         # Try recovery override first (this is quick & safe)
         rec_active, rec_action = self.recovery.act(packet, self.index, intent=self._last_intent if hasattr(self, "_last_intent") else None)
         if rec_active:
             action = rec_action
         else:
-            # 1) Aerial overrides by intent
-            if intent == "BACKBOARD_DEFEND":
+            if intent == "EXPLOIT":
+                ctl, fin = self.finisher.act(packet, self.index, ctx)
+                self._last_finish = fin
+                extras["finisher_choice"] = fin
+                try:
+                    self.telemetry._pending_info.update({"finisher_choice": fin})
+                except Exception:
+                    pass
+                action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
+                                   1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
+            elif intent == "BACKBOARD_DEFEND":
                 ctl = self.air_defense.act(packet, self.index)
                 action = np.array([ctl.steer or 0.0, ctl.throttle or 0.0, ctl.pitch or 0.0, ctl.yaw or 0.0, ctl.roll or 0.0,
                                    1.0 if ctl.jump else 0.0, 1.0 if ctl.boost else 0.0, 1.0 if ctl.handbrake else 0.0], dtype=np.float32)
@@ -603,6 +629,8 @@ class Destroyer(BaseAgent):
 
         # --- Reward + buffer
         info = self._info_from_packet(packet)
+        if extras:
+            info.update(extras)
         try:
             if ctx:
                 info.update(dict(
@@ -712,9 +740,7 @@ class Destroyer(BaseAgent):
                 # Build a short "reasons" string from ctx
                 rP = float(ctx.get("pressure_idx", 0.0))
                 rT = float(ctx.get("threat_idx", 0.0))
-                rO = float(info.get("overcommit_flag", 0.0))
-                rB = float(info.get("boost_delta_norm", 0.0))
-                reasons = f"P:{rP:.2f} T:{rT:.2f} ΔBoost:{rB:+.2f} OC:{rO:.2f}"
+                reasons = f"P:{rP:.2f} T:{rT:.2f} EXP:{int(ctx.get('exploit_window',0))} FIN:{getattr(self,'_last_finish','')}"
                 stage_name = STAGES[self.academy.stage_idx].name
                 draw_hud(self.renderer, 10, 24, stage_name, intent, reasons, self._progress, sample_out)
         except Exception:
