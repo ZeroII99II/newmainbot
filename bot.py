@@ -2,6 +2,7 @@
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
 from rlbot.utils.game_state_util import GameState, BallState, CarState, Physics, Vector3, Rotator
 import numpy as np
+import configparser, os
 # unify any other alias we might have used earlier
 _np = np
 import math
@@ -27,6 +28,10 @@ from drills_ssl import (
     inject_bad_recovery,
     inject_box_clear,
     inject_box_panic,
+    inject_kickoff_basic,
+    inject_shadow_lane,
+    inject_corner_push_shot,
+    inject_pad_lane,
 )
 
 # ===== Runtime knobs =====
@@ -47,7 +52,7 @@ ALLOWED_INDICES = {0, 1}         # clean 1v1 only
 
 # ==== Model resume settings ====
 from pathlib import Path
-import os, shutil
+import shutil
 
 # We prefer to train on a local working copy so the original base file is never overwritten.
 MODEL_PREFERENCE = ["destroyer.pt", "necto-model.pt", "necto.pt", "NectoModel.pt", "model.pt"]
@@ -207,6 +212,7 @@ class Destroyer(BaseAgent):
         self.reward_fn = SSLReward(DEFAULT_SSL_W)
         self.buffer = RingBuffer(capacity=200_000, obs_dim=107, act_dim=8)
         self.heur = HeuristicBrain()
+        self.heur.agent = self
         self.telemetry = SkillTelemetry()
         self.recovery = RecoveryBrain()
         self.air_offense = AirDribbleBrain()
@@ -278,11 +284,35 @@ class Destroyer(BaseAgent):
         self._progress_last_pass_t = 0.0
         self._last_overlay_time = 0.0
 
+        # Read Bronze Bootcamp lock
+        cfg = configparser.ConfigParser()
+        cfg.read("academy.cfg")
+        start_stage = (cfg.get("Academy", "start_stage", fallback="auto") or "auto").strip()
+        self._lock_stage = cfg.getboolean("Academy", "lock_stage", fallback=False)
+        self._show_hud = cfg.getboolean("Academy", "show_hud", fallback=False)
+        if start_stage.lower() != "auto":
+            try:
+                from curriculum import STAGES
+                names = [s.name for s in STAGES]
+                if start_stage in names:
+                    self.academy.stage_idx = names.index(start_stage)
+                    print(f"[Academy] Forced start stage: {start_stage}")
+            except Exception:
+                pass
+
+        # Bronze gating switches
+        self._bronze_mode = (start_stage == "Bronze")
+
         # cache a baseline of reward weights if you have them exposed; ok if empty
         self._base_reward_weights = dict(getattr(self, "reward_weights", {})) if hasattr(self, "reward_weights") else {}
         self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
 
         print(f"[Destroyer Academy] Starting at stage: {STAGES[self.academy.stage_idx].name}")
+
+        if getattr(self, "_bronze_mode", False):
+            self.drill_probs["core"]   = [("kickoff_basic", 0.30), ("shadow_lane", 0.30), ("pad_lane", 0.20), ("box_clear", 0.20)]
+            self.drill_probs["reads"]  = [("box_clear", 0.40), ("shadow_lane", 0.60)]
+            self.drill_probs["aerial"] = []
 
         print(f"{BOT_NAME} Ready - Index: {self.index}")
 
@@ -393,6 +423,14 @@ class Destroyer(BaseAgent):
                     inject_box_clear(self)
                 elif choice == "box_panic":
                     inject_box_panic(self)
+                elif choice == "kickoff_basic":
+                    inject_kickoff_basic(self)
+                elif choice == "shadow_lane":
+                    inject_shadow_lane(self)
+                elif choice == "corner_push":
+                    inject_corner_push_shot(self)
+                elif choice == "pad_lane":
+                    inject_pad_lane(self)
             except Exception:
                 pass
             self._last_drill_time = now
@@ -515,6 +553,13 @@ class Destroyer(BaseAgent):
         intent = ctx.get("intent", "PRESS")
         if self._opp_challenge_early > 3 and intent in ("DRIBBLE","CONTROL"):
             intent = "FAKE"  # bait early challenge
+        if getattr(self, "_bronze_mode", False):
+            BRONZE_ALLOWED = {"SHADOW","CLEAR","CLEAR_CORNER","CONTROL","BOOST","CHALLENGE","SHOOT"}
+            if intent not in BRONZE_ALLOWED:
+                if intent in ("AIR_DRIBBLE","BACKBOARD_DEFEND","EXPLOIT","STARVE","BUMP","FAKE"):
+                    intent = "PRESS" if intent == "EXPLOIT" else "CLEAR"
+                else:
+                    intent = "CONTROL"
         ctx["intent"] = intent
         self._last_intent = intent
 
@@ -719,17 +764,19 @@ class Destroyer(BaseAgent):
         else:
             self._progress_last_pass_t = 0.0
 
-        if (elapsed > spec.min_play_secs and
-            self._progress_last_pass_t and
-            (elapsed - self._progress_last_pass_t) > spec.sustain_secs):
-            # advance stage
-            self.academy.stage_idx = min(self.academy.stage_idx + 1, len(STAGES)-1)
-            self.academy.stage_started_at = time.time()
-            self.academy.save()
-            # refresh stage boosts
-            self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
-            print(f"[Destroyer Academy] Advanced to stage: {STAGES[self.academy.stage_idx].name}")
-            self._progress_last_pass_t = 0.0
+        if not getattr(self, "_lock_stage", False):
+            if (elapsed > spec.min_play_secs and
+                self._progress_last_pass_t and
+                (elapsed - self._progress_last_pass_t) > spec.sustain_secs):
+                # advance stage
+                self.academy.stage_idx = min(self.academy.stage_idx + 1, len(STAGES)-1)
+                self.academy.stage_started_at = time.time()
+                self.academy.save()
+                # refresh stage boosts
+                self._stage_reward_weights = combine_reward_boosts(self._base_reward_weights, STAGES[self.academy.stage_idx])
+                print(f"[Destroyer Academy] Advanced to stage: {STAGES[self.academy.stage_idx].name}")
+                self._progress_last_pass_t = 0.0
+        # else: locked — never auto-advance
 
         info["_stage_reward_weights"] = self._stage_reward_weights
 
@@ -756,10 +803,12 @@ class Destroyer(BaseAgent):
                 pass
 
         try:
-            show_hud = (not FAST_MODE)
+            show_hud = (not FAST_MODE) or getattr(self, "_show_hud", False)
             if show_hud and self.renderer is not None:
                 car = packet.game_cars[self.index]
                 stage_name = STAGES[self.academy.stage_idx].name if hasattr(self, "academy") else "—"
+                if getattr(self, "_bronze_mode", False):
+                    stage_name += " • Bootcamp"
                 progress = float(getattr(self, "_progress", 0.0))
                 reasons = (
                     f"P:{float(ctx.get('pressure_idx',0.0)):.2f} "
@@ -768,6 +817,12 @@ class Destroyer(BaseAgent):
                     f"DZ:{int(bool(ctx.get('danger_zone',False)))} "
                     f"EXP:{int(bool(ctx.get('exploit_window',False)))}"
                 )
+                if getattr(self, "_bronze_mode", False):
+                    reasons += (
+                        f"  BC:KO {int(info.get('kickoff_first_touch',0))} "
+                        f" PT {info.get('perfect_touch',0):.2f} "
+                        f" Pads {info.get('small_pad_pickup',0):.0f}"
+                    )
                 last_attempt = getattr(self, "_last_finish", "") or info.get("finisher_choice", "") or ""
                 draw_overlay(
                     self.renderer,
